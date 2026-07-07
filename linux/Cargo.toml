@@ -6,6 +6,7 @@ description = "HyperLink Linux host application — see docs/SYSTEM_DESIGN.md"
 license = "Apache-2.0"
 
 [dependencies]
+hyperlink-protocol = { path = "../protocol" }
 # quinn = "..."      # QUIC transport — Phase 1
 # gstreamer = "..."  # video decode pipeline — Phase 2
 # gtk4 = "..."       # UI — Phase 2+
