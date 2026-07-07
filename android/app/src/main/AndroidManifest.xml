@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HyperLink companion — scaffold manifest. Permissions added per phase as features land. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Phase 2: MediaProjection requires a foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <application
+        android:label="HyperLink"
+        android:allowBackup="false">
+        <!-- Companion service, notification listener, etc. registered as each phase lands -->
+    </application>
+
+</manifest>

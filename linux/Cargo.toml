@@ -1,0 +1,17 @@
+[package]
+name = "hyperlink-linux"
+version = "0.1.0"
+edition = "2021"
+description = "HyperLink Linux host application — see docs/SYSTEM_DESIGN.md"
+license = "Apache-2.0"
+
+[dependencies]
+# quinn = "..."      # QUIC transport — Phase 1
+# gstreamer = "..."  # video decode pipeline — Phase 2
+# gtk4 = "..."       # UI — Phase 2+
+# libadwaita = "..." # UI — Phase 2+
+# tokio = { version = "...", features = ["full"] } # async runtime — Phase 1
+
+[[bin]]
+name = "hyperlink-linux"
+path = "src/main.rs"

@@ -1,0 +1,14 @@
+[package]
+name = "hyperlink-bench"
+version = "0.1.0"
+edition = "2021"
+description = "HyperLink latency/throughput measurement harness — see docs/SYSTEM_DESIGN.md Phase 0"
+license = "Apache-2.0"
+
+[dependencies]
+# tokio = { version = "...", features = ["full"] }
+# quinn = "..."
+
+[[bin]]
+name = "hyperlink-bench"
+path = "src/main.rs"
