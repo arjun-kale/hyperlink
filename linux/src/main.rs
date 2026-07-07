@@ -62,7 +62,8 @@ async fn main() -> anyhow::Result<()> {
     let host_config = DeviceConfig::load_or_create(&config_path, &cli.name)?;
 
     // Start mDNS advertisement.
-    let _discovery = match discovery::start_advertisement(&host_config.device_name, cli.bind.port()) {
+    let _discovery = match discovery::start_advertisement(&host_config.device_name, cli.bind.port())
+    {
         Ok(handle) => {
             info!("mDNS advertisement started successfully");
             Some(handle)
@@ -80,7 +81,14 @@ async fn main() -> anyhow::Result<()> {
     println!();
     println!("  Device Name:   {}", host_config.device_name);
     println!("  Listening on:  {}", cli.bind);
-    println!("  Mode:          {}", if cli.pair { "Pairing Mode" } else { "Normal Mode" });
+    println!(
+        "  Mode:          {}",
+        if cli.pair {
+            "Pairing Mode"
+        } else {
+            "Normal Mode"
+        }
+    );
     println!("  Press Ctrl+C to stop.");
     println!();
 

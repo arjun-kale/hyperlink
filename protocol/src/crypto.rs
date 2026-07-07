@@ -3,14 +3,14 @@
 //! Provides the core Trust-On-First-Use verifier implementations and
 //! cert generation using `rcgen`.
 
-use std::sync::{Arc, Mutex};
-use std::collections::HashSet;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::DistinguishedName;
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error, SignatureScheme};
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 /// Compute the SHA-256 fingerprint of a DER-encoded certificate.
 pub fn compute_fingerprint(cert_der: &[u8]) -> [u8; 32] {
@@ -87,8 +87,8 @@ impl TofuServerVerifier {
         is_pairing: bool,
         pending_state: Option<Arc<Mutex<PendingPairingState>>>,
     ) -> Self {
-        let supported_algos = rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms;
+        let supported_algos =
+            rustls::crypto::ring::default_provider().signature_verification_algorithms;
         Self {
             trusted_fingerprints,
             is_pairing,
@@ -123,7 +123,9 @@ impl ServerCertVerifier for TofuServerVerifier {
         if trusted.contains(&fp) {
             Ok(ServerCertVerified::assertion())
         } else {
-            Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+            Err(Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
         }
     }
 
@@ -169,8 +171,8 @@ impl TofuClientVerifier {
         is_pairing: bool,
         pending_state: Option<Arc<Mutex<PendingPairingState>>>,
     ) -> Self {
-        let supported_algos = rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms;
+        let supported_algos =
+            rustls::crypto::ring::default_provider().signature_verification_algorithms;
         Self {
             trusted_fingerprints,
             is_pairing,
@@ -203,7 +205,9 @@ impl ClientCertVerifier for TofuClientVerifier {
         if trusted.contains(&fp) {
             Ok(ClientCertVerified::assertion())
         } else {
-            Err(Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+            Err(Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
         }
     }
 
@@ -265,15 +269,21 @@ mod tests {
     fn test_mtls_tofu_handshake() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         // 1. Generate keys and certs for client and server.
-        let rcgen::CertifiedKey { cert: server_cert, signing_key: server_signing_key } =
-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let rcgen::CertifiedKey {
+            cert: server_cert,
+            signing_key: server_signing_key,
+        } = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         let server_cert_der = CertificateDer::from(server_cert.der().to_vec());
-        let server_key_der = rustls_pki_types::PrivatePkcs8KeyDer::from(server_signing_key.serialize_der());
+        let server_key_der =
+            rustls_pki_types::PrivatePkcs8KeyDer::from(server_signing_key.serialize_der());
 
-        let rcgen::CertifiedKey { cert: client_cert, signing_key: client_signing_key } =
-            rcgen::generate_simple_self_signed(vec!["client".to_string()]).unwrap();
+        let rcgen::CertifiedKey {
+            cert: client_cert,
+            signing_key: client_signing_key,
+        } = rcgen::generate_simple_self_signed(vec!["client".to_string()]).unwrap();
         let client_cert_der = CertificateDer::from(client_cert.der().to_vec());
-        let client_key_der = rustls_pki_types::PrivatePkcs8KeyDer::from(client_signing_key.serialize_der());
+        let client_key_der =
+            rustls_pki_types::PrivatePkcs8KeyDer::from(client_signing_key.serialize_der());
 
         // 2. Set up TOFU verifiers in pairing mode.
         let server_trusted = Arc::new(Mutex::new(HashSet::new()));
@@ -319,7 +329,9 @@ mod tests {
         loop {
             // Client writes to server
             if client_conn.wants_write() {
-                let n = client_conn.write_tls(&mut client_to_server.as_mut_slice()).unwrap();
+                let n = client_conn
+                    .write_tls(&mut client_to_server.as_mut_slice())
+                    .unwrap();
                 if n > 0 {
                     let mut read_cursor = std::io::Cursor::new(&client_to_server[..n]);
                     server_conn.read_tls(&mut read_cursor).unwrap();
@@ -329,7 +341,9 @@ mod tests {
 
             // Server writes to client
             if server_conn.wants_write() {
-                let n = server_conn.write_tls(&mut server_to_client.as_mut_slice()).unwrap();
+                let n = server_conn
+                    .write_tls(&mut server_to_client.as_mut_slice())
+                    .unwrap();
                 if n > 0 {
                     let mut read_cursor = std::io::Cursor::new(&server_to_client[..n]);
                     client_conn.read_tls(&mut read_cursor).unwrap();
@@ -346,8 +360,14 @@ mod tests {
         let client_fp_captured = server_pending.lock().unwrap().peer_fingerprint.unwrap();
         let server_fp_captured = client_pending.lock().unwrap().peer_fingerprint.unwrap();
 
-        assert_eq!(client_fp_captured, compute_fingerprint(client_cert_der.as_ref()));
-        assert_eq!(server_fp_captured, compute_fingerprint(server_cert_der.as_ref()));
+        assert_eq!(
+            client_fp_captured,
+            compute_fingerprint(client_cert_der.as_ref())
+        );
+        assert_eq!(
+            server_fp_captured,
+            compute_fingerprint(server_cert_der.as_ref())
+        );
 
         // Verify pairing PIN.
         let pin = generate_pairing_pin(&client_fp_captured, &server_fp_captured);
@@ -371,16 +391,25 @@ mod tests {
 
         let server_config_normal = rustls::ServerConfig::builder()
             .with_client_cert_verifier(server_verifier_normal)
-            .with_single_cert(vec![server_cert_der.clone()], rustls_pki_types::PrivatePkcs8KeyDer::from(server_signing_key.serialize_der()).into())
+            .with_single_cert(
+                vec![server_cert_der.clone()],
+                rustls_pki_types::PrivatePkcs8KeyDer::from(server_signing_key.serialize_der())
+                    .into(),
+            )
             .unwrap();
 
         let client_config_normal = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(client_verifier_normal)
-            .with_client_auth_cert(vec![client_cert_der.clone()], rustls_pki_types::PrivatePkcs8KeyDer::from(client_signing_key.serialize_der()).into())
+            .with_client_auth_cert(
+                vec![client_cert_der.clone()],
+                rustls_pki_types::PrivatePkcs8KeyDer::from(client_signing_key.serialize_der())
+                    .into(),
+            )
             .unwrap();
 
-        let mut server_conn_normal = rustls::ServerConnection::new(Arc::new(server_config_normal)).unwrap();
+        let mut server_conn_normal =
+            rustls::ServerConnection::new(Arc::new(server_config_normal)).unwrap();
         let mut client_conn_normal = rustls::ClientConnection::new(
             Arc::new(client_config_normal),
             ServerName::try_from("localhost").unwrap(),
@@ -389,7 +418,9 @@ mod tests {
 
         loop {
             if client_conn_normal.wants_write() {
-                let n = client_conn_normal.write_tls(&mut client_to_server.as_mut_slice()).unwrap();
+                let n = client_conn_normal
+                    .write_tls(&mut client_to_server.as_mut_slice())
+                    .unwrap();
                 if n > 0 {
                     let mut read_cursor = std::io::Cursor::new(&client_to_server[..n]);
                     server_conn_normal.read_tls(&mut read_cursor).unwrap();
@@ -398,7 +429,9 @@ mod tests {
             }
 
             if server_conn_normal.wants_write() {
-                let n = server_conn_normal.write_tls(&mut server_to_client.as_mut_slice()).unwrap();
+                let n = server_conn_normal
+                    .write_tls(&mut server_to_client.as_mut_slice())
+                    .unwrap();
                 if n > 0 {
                     let mut read_cursor = std::io::Cursor::new(&server_to_client[..n]);
                     client_conn_normal.read_tls(&mut read_cursor).unwrap();
@@ -412,8 +445,10 @@ mod tests {
         }
 
         // 6. Test Untrusted Client connection rejection.
-        let rcgen::CertifiedKey { cert: untrusted_client_cert, signing_key: untrusted_client_signing_key } =
-            rcgen::generate_simple_self_signed(vec!["untrusted".to_string()]).unwrap();
+        let rcgen::CertifiedKey {
+            cert: untrusted_client_cert,
+            signing_key: untrusted_client_signing_key,
+        } = rcgen::generate_simple_self_signed(vec!["untrusted".to_string()]).unwrap();
         let untrusted_client_cert_der = CertificateDer::from(untrusted_client_cert.der().to_vec());
 
         let untrusted_client_config = rustls::ClientConfig::builder()
@@ -424,7 +459,13 @@ mod tests {
                 false,
                 None,
             )))
-            .with_client_auth_cert(vec![untrusted_client_cert_der.clone()], rustls_pki_types::PrivatePkcs8KeyDer::from(untrusted_client_signing_key.serialize_der()).into())
+            .with_client_auth_cert(
+                vec![untrusted_client_cert_der.clone()],
+                rustls_pki_types::PrivatePkcs8KeyDer::from(
+                    untrusted_client_signing_key.serialize_der(),
+                )
+                .into(),
+            )
             .unwrap();
 
         let mut server_conn_reject = rustls::ServerConnection::new(Arc::new(
@@ -434,9 +475,14 @@ mod tests {
                     false, // normal mode
                     None,
                 )))
-                .with_single_cert(vec![server_cert_der.clone()], rustls_pki_types::PrivatePkcs8KeyDer::from(server_signing_key.serialize_der()).into())
-                .unwrap()
-        )).unwrap();
+                .with_single_cert(
+                    vec![server_cert_der.clone()],
+                    rustls_pki_types::PrivatePkcs8KeyDer::from(server_signing_key.serialize_der())
+                        .into(),
+                )
+                .unwrap(),
+        ))
+        .unwrap();
 
         let mut client_conn_reject = rustls::ClientConnection::new(
             Arc::new(untrusted_client_config),
@@ -447,14 +493,16 @@ mod tests {
         let mut failed = false;
         loop {
             if client_conn_reject.wants_write() {
-                let n = client_conn_reject.write_tls(&mut client_to_server.as_mut_slice()).unwrap();
+                let n = client_conn_reject
+                    .write_tls(&mut client_to_server.as_mut_slice())
+                    .unwrap();
                 if n > 0 {
                     let mut read_cursor = std::io::Cursor::new(&client_to_server[..n]);
-                    if let Err(_) = server_conn_reject.read_tls(&mut read_cursor) {
+                    if server_conn_reject.read_tls(&mut read_cursor).is_err() {
                         failed = true;
                         break;
                     }
-                    if let Err(_) = server_conn_reject.process_new_packets() {
+                    if server_conn_reject.process_new_packets().is_err() {
                         failed = true;
                         break;
                     }
@@ -462,14 +510,16 @@ mod tests {
             }
 
             if server_conn_reject.wants_write() {
-                let n = server_conn_reject.write_tls(&mut server_to_client.as_mut_slice()).unwrap();
+                let n = server_conn_reject
+                    .write_tls(&mut server_to_client.as_mut_slice())
+                    .unwrap();
                 if n > 0 {
                     let mut read_cursor = std::io::Cursor::new(&server_to_client[..n]);
-                    if let Err(_) = client_conn_reject.read_tls(&mut read_cursor) {
+                    if client_conn_reject.read_tls(&mut read_cursor).is_err() {
                         failed = true;
                         break;
                     }
-                    if let Err(_) = client_conn_reject.process_new_packets() {
+                    if client_conn_reject.process_new_packets().is_err() {
                         failed = true;
                         break;
                     }

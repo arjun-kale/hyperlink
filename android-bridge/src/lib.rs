@@ -3,23 +3,23 @@
 //! Handles background QUIC client connections, TOFU certificate verification,
 //! pairing PIN generation, mDNS discovery integration, and event polling.
 
+#![allow(clippy::missing_safety_doc)]
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use jni::objects::{JByteArray, JClass, JString};
+use jni::sys::{jboolean, jint, jstring};
 use jni::JNIEnv;
-use jni::objects::{JClass, JString, JByteArray};
-use jni::sys::{jint, jboolean, jstring};
 use lazy_static::lazy_static;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use hyperlink_protocol::config::DeviceConfig;
-use hyperlink_protocol::crypto::{
-    self, PendingPairingState, TofuServerVerifier,
-};
+use hyperlink_protocol::crypto::{self, PendingPairingState, TofuServerVerifier};
 
 lazy_static! {
     /// Global Tokio runtime for running background tasks.
@@ -71,7 +71,7 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_initialize
     storage_path: JString,
 ) {
     let storage_path: String = env.get_string(&storage_path).unwrap().into();
-    
+
     // Initialize android logger.
     #[cfg(target_os = "android")]
     {
@@ -81,10 +81,13 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_initialize
             .try_init();
     }
 
-    info!("initializing client config at storage path: {}", storage_path);
+    info!(
+        "initializing client config at storage path: {}",
+        storage_path
+    );
 
     let path = Path::new(&storage_path).join("client_config.json");
-    
+
     let mut state = CLIENT_STATE.lock().unwrap();
     if state.config.is_some() {
         return; // already initialized
@@ -92,7 +95,10 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_initialize
 
     match DeviceConfig::load_or_create(&path, "Android-Companion") {
         Ok(config) => {
-            info!("client config loaded successfully, device name: {}", config.device_name);
+            info!(
+                "client config loaded successfully, device name: {}",
+                config.device_name
+            );
             state.config = Some(config);
             state.config_path = Some(path);
         }
@@ -120,7 +126,10 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_connectHos
     let port = port as u16;
     let is_pairing = is_pairing != 0;
 
-    info!("connecting to host {}:{} (pairing={})", host_ip, port, is_pairing);
+    info!(
+        "connecting to host {}:{} (pairing={})",
+        host_ip, port, is_pairing
+    );
 
     let state = CLIENT_STATE.lock().unwrap();
     let config = match state.config {
@@ -149,21 +158,24 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_confirmPai
     _class: JClass,
 ) -> jboolean {
     let mut state = CLIENT_STATE.lock().unwrap();
-    
-    if let (Some(fp), Some(mut config), Some(ref path)) = (
+
+    if let (Some(fp), Some(mut config), Some(path)) = (
         state.pending_pairing_fp.take(),
         state.config.clone(),
         state.config_path.as_ref(),
     ) {
         let fp_str = crypto::fingerprint_to_string(&fp);
-        info!("pairing confirmed: adding trusted host fingerprint: {}", fp_str);
-        
+        info!(
+            "pairing confirmed: adding trusted host fingerprint: {}",
+            fp_str
+        );
+
         config.add_trusted_peer("Linux-Host", &fp_str);
         if let Err(e) = config.save(path) {
             error!("failed to save updated config: {}", e);
             return 0; // false
         }
-        
+
         state.config = Some(config);
         1 // true
     } else {
@@ -203,9 +215,7 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_pollEvent(
                     ClientEvent::PairingPinGenerated(pin) => {
                         format!("{{\"type\":\"pairing_pin\",\"pin\":{}}}", pin)
                     }
-                    ClientEvent::Connected => {
-                        "{\"type\":\"connected\"}".to_string()
-                    }
+                    ClientEvent::Connected => "{\"type\":\"connected\"}".to_string(),
                     ClientEvent::Disconnected(reason) => {
                         format!("{{\"type\":\"disconnected\",\"reason\":\"{}\"}}", reason)
                     }
@@ -239,8 +249,8 @@ async fn run_connection_task(
     let addr: SocketAddr = format!("{}:{}", host_ip, port).parse()?;
 
     // Load certs.
-    let client_certs = rustls_pemfile::certs(&mut config.cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()?;
+    let client_certs =
+        rustls_pemfile::certs(&mut config.cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
     let client_key = rustls_pemfile::private_key(&mut config.key_pem.as_bytes())?
         .ok_or_else(|| anyhow::anyhow!("private key missing in config"))?;
 
@@ -264,7 +274,7 @@ async fn run_connection_task(
     let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|e| anyhow::anyhow!("failed to create QuicClientConfig: {}", e))?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
-    
+
     // Set transport options (keepalives, connection timeouts).
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
@@ -296,12 +306,14 @@ async fn run_connection_task(
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("no certs"))??;
             let our_fp = crypto::compute_fingerprint(&our_cert_der);
-            
+
             let pin = crypto::generate_pairing_pin(&our_fp, &fp);
             info!("pairing PIN generated: {}", pin);
             emit_event(ClientEvent::PairingPinGenerated(pin));
         } else {
-            return Err(anyhow::anyhow!("peer certificate not captured during handshake"));
+            return Err(anyhow::anyhow!(
+                "peer certificate not captured during handshake"
+            ));
         }
     } else {
         emit_event(ClientEvent::Connected);
@@ -309,7 +321,7 @@ async fn run_connection_task(
 
     // Set up control stream.
     let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
-    
+
     // Write stream type byte (0x50 = Control Plane) as the very first byte of the stream.
     send_stream.write_all(&[0x50]).await?;
     info!("control plane stream opened");
@@ -363,7 +375,7 @@ async fn run_connection_task(
     }
 
     emit_event(ClientEvent::Disconnected("Connection closed".to_string()));
-    
+
     // Reset control channel.
     {
         let mut state = CLIENT_STATE.lock().unwrap();

@@ -39,7 +39,7 @@ impl DeviceConfig {
     /// Generate new cert and private key pair for the device.
     pub fn generate(device_name: &str) -> anyhow::Result<Self> {
         let subject_alt_names = vec![device_name.to_string(), "localhost".to_string()];
-        
+
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(subject_alt_names)?;
 
@@ -64,7 +64,8 @@ impl DeviceConfig {
 
     /// Add a peer to the trusted list and save.
     pub fn add_trusted_peer(&mut self, peer_name: &str, fingerprint: &str) {
-        self.trusted_peers.insert(peer_name.to_string(), fingerprint.to_string());
+        self.trusted_peers
+            .insert(peer_name.to_string(), fingerprint.to_string());
     }
 
     /// Remove a peer from the trusted list.

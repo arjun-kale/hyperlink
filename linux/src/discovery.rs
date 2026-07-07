@@ -1,8 +1,8 @@
 //! mDNS/Avahi service advertisement for local network discovery.
 
-use std::collections::HashMap;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
-use tracing::{info, error};
+use std::collections::HashMap;
+use tracing::{error, info};
 
 pub struct DiscoveryHandle {
     daemon: ServiceDaemon,
@@ -10,10 +10,7 @@ pub struct DiscoveryHandle {
 }
 
 /// Register the HyperLink service over mDNS so clients can locate the host on the LAN.
-pub fn start_advertisement(
-    device_name: &str,
-    port: u16,
-) -> anyhow::Result<DiscoveryHandle> {
+pub fn start_advertisement(device_name: &str, port: u16) -> anyhow::Result<DiscoveryHandle> {
     let daemon = ServiceDaemon::new()?;
 
     // Service type for HyperLink: _hyperlink._udp.local.
@@ -44,10 +41,7 @@ pub fn start_advertisement(
 
     daemon.register(service_info)?;
 
-    Ok(DiscoveryHandle {
-        daemon,
-        fullname,
-    })
+    Ok(DiscoveryHandle { daemon, fullname })
 }
 
 impl Drop for DiscoveryHandle {

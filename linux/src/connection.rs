@@ -9,9 +9,7 @@ use rustls::pki_types::CertificateDer;
 use tracing::{debug, error, info, warn};
 
 use hyperlink_protocol::config::DeviceConfig;
-use hyperlink_protocol::crypto::{
-    self, PendingPairingState, TofuClientVerifier,
-};
+use hyperlink_protocol::crypto::{self, PendingPairingState, TofuClientVerifier};
 
 /// Starts the QUIC server and listens for incoming connections.
 pub async fn start_server(
@@ -21,8 +19,8 @@ pub async fn start_server(
     is_pairing: bool,
 ) -> anyhow::Result<()> {
     // Parse certificate and key.
-    let certs = rustls_pemfile::certs(&mut config.cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs =
+        rustls_pemfile::certs(&mut config.cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
     let key = rustls_pemfile::private_key(&mut config.key_pem.as_bytes())?
         .ok_or_else(|| anyhow::anyhow!("private key missing in host config"))?;
 
@@ -45,7 +43,7 @@ pub async fn start_server(
     let quic_server_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
         .map_err(|e| anyhow::anyhow!("failed to create QuicServerConfig: {}", e))?;
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_crypto));
-    
+
     // Set transport options.
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
@@ -126,7 +124,10 @@ async fn handle_incoming_connection(
             println!("\n╔══════════════════════════════════════════════════════════╗");
             println!("║              PAIRING REQUEST RECEIVED                    ║");
             println!("╚══════════════════════════════════════════════════════════╝");
-            println!("  Client certificate fingerprint: {}", crypto::fingerprint_to_string(&fp));
+            println!(
+                "  Client certificate fingerprint: {}",
+                crypto::fingerprint_to_string(&fp)
+            );
             println!("  Mutual validation PIN:          {:06}", pin);
             println!("  Do you trust this device? (y/n): ");
 
@@ -159,7 +160,9 @@ async fn handle_incoming_connection(
             }
         } else {
             connection.close(0u32.into(), b"pairing error");
-            return Err(anyhow::anyhow!("failed to capture client certificate fingerprint"));
+            return Err(anyhow::anyhow!(
+                "failed to capture client certificate fingerprint"
+            ));
         }
     } else {
         info!("paired client connected securely");
@@ -176,7 +179,10 @@ async fn handle_incoming_connection(
                 }
 
                 let stream_type = stream_type_buf[0];
-                info!("new bidirectional stream accepted, type: 0x{:02X}", stream_type);
+                info!(
+                    "new bidirectional stream accepted, type: 0x{:02X}",
+                    stream_type
+                );
 
                 if stream_type == 0x50 {
                     // Control plane stream. Start heartbeat echo loop.
