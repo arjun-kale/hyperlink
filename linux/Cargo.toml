@@ -7,11 +7,18 @@ license = "Apache-2.0"
 
 [dependencies]
 hyperlink-protocol = { path = "../protocol" }
-# quinn = "..."      # QUIC transport — Phase 1
-# gstreamer = "..."  # video decode pipeline — Phase 2
-# gtk4 = "..."       # UI — Phase 2+
-# libadwaita = "..." # UI — Phase 2+
-# tokio = { version = "...", features = ["full"] } # async runtime — Phase 1
+quinn = "0.11"
+tokio = { version = "1", features = ["full"] }
+mdns-sd = "0.20"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+clap = { version = "4", features = ["derive"] }
 
 [[bin]]
 name = "hyperlink-linux"

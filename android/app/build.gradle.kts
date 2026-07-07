@@ -25,7 +25,5 @@ android {
 }
 
 dependencies {
-    // MediaCodec / MediaProjection: platform APIs, no extra dependency needed
-    // QUIC client: TBD in Phase 1 — evaluate available Kotlin/Java QUIC libraries
-    // FlatBuffers / Protobuf generated code: wired up alongside protocol/ in Phase 1
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }

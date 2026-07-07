@@ -27,6 +27,10 @@ pub enum MessageType {
     // 0x30–0x3F: video stream messages
     // 0x40–0x4F: input stream messages
     // 0x50–0x5F: control-plane messages (notifications, clipboard)
+    /// Client initiates pairing and sends its name (client → server).
+    PairRequest = 0x50,
+    /// Server accepts or rejects pairing (server → client).
+    PairResponse = 0x51,
     // 0x60–0x6F: file stream messages
 }
 
@@ -40,6 +44,8 @@ impl TryFrom<u8> for MessageType {
             0x10 => Ok(Self::EchoRequest),
             0x11 => Ok(Self::EchoResponse),
             0x20 => Ok(Self::Heartbeat),
+            0x50 => Ok(Self::PairRequest),
+            0x51 => Ok(Self::PairResponse),
             other => Err(other),
         }
     }
@@ -53,6 +59,8 @@ impl std::fmt::Display for MessageType {
             Self::EchoRequest => write!(f, "EchoRequest"),
             Self::EchoResponse => write!(f, "EchoResponse"),
             Self::Heartbeat => write!(f, "Heartbeat"),
+            Self::PairRequest => write!(f, "PairRequest"),
+            Self::PairResponse => write!(f, "PairResponse"),
         }
     }
 }
@@ -69,6 +77,8 @@ mod tests {
             MessageType::EchoRequest,
             MessageType::EchoResponse,
             MessageType::Heartbeat,
+            MessageType::PairRequest,
+            MessageType::PairResponse,
         ];
         for msg_type in types {
             let raw = msg_type as u8;
