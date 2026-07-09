@@ -48,6 +48,8 @@ pub async fn start_server(
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
     transport.keep_alive_interval(Some(Duration::from_secs(3)));
+    transport.datagram_receive_buffer_size(Some(65536 * 8));
+    transport.datagram_send_buffer_size(65536 * 8);
     server_config.transport_config(Arc::new(transport));
 
     let endpoint = Endpoint::server(server_config, bind_addr)?;
@@ -167,6 +169,117 @@ async fn handle_incoming_connection(
     } else {
         info!("paired client connected securely");
     }
+
+    // Spawn background task to accept unidirectional streams (for VideoConfig)
+    let conn_uni = connection.clone();
+    tokio::spawn(async move {
+        while let Ok(mut recv_stream) = conn_uni.accept_uni().await {
+            tokio::spawn(async move {
+                let mut stream_type_buf = [0u8; 1];
+                if recv_stream.read_exact(&mut stream_type_buf).await.is_ok() {
+                    let stream_type = stream_type_buf[0];
+                    if stream_type == 0x31 {
+                        if let Ok(buf) = recv_stream.read_to_end(65536).await {
+                            if let Ok(header) = hyperlink_protocol::version::Header::decode(&buf) {
+                                if header.message_type
+                                    == hyperlink_protocol::message::MessageType::VideoConfig
+                                {
+                                    let payload = &buf[hyperlink_protocol::version::HEADER_SIZE..];
+                                    if let Ok(config) =
+                                        hyperlink_protocol::video::VideoConfig::decode(payload)
+                                    {
+                                        info!(
+                                            "received video config: SPS={} bytes, PPS={} bytes",
+                                            config.sps.len(),
+                                            config.pps.len()
+                                        );
+                                        #[cfg(feature = "video")]
+                                        if let Some(sender) = crate::UI_SENDER.get() {
+                                            let _ = sender.send(crate::VideoGuiMessage::Config {
+                                                sps: config.sps,
+                                                pps: config.pps,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    // Spawn background task to read datagrams (for VideoFrame)
+    let conn_dg = connection.clone();
+    tokio::spawn(
+        #[allow(unused_variables, unused_assignments)]
+        async move {
+            let mut newest_seen_id = 0u32;
+            let mut current_frame_id: Option<u32> = None;
+            let mut fragments: Vec<Option<Vec<u8>>> = Vec::new();
+            let mut received_count = 0;
+            let mut current_is_keyframe = false;
+            let mut current_timestamp = 0u64;
+
+            while let Ok(datagram) = conn_dg.read_datagram().await {
+                if let Ok(hl_header) =
+                    hyperlink_protocol::version::Header::decode(&datagram)
+                {
+                    if hl_header.message_type
+                        == hyperlink_protocol::message::MessageType::VideoFrame
+                    {
+                        let payload = &datagram[hyperlink_protocol::version::HEADER_SIZE..];
+                        if let Ok(video_header) =
+                            hyperlink_protocol::video::VideoFrameHeader::decode(payload)
+                        {
+                            if hyperlink_protocol::video::is_frame_stale(
+                                video_header.frame_id,
+                                newest_seen_id,
+                            ) {
+                                continue;
+                            }
+                            newest_seen_id = newest_seen_id.max(video_header.frame_id);
+
+                            if current_frame_id != Some(video_header.frame_id) {
+                                current_frame_id = Some(video_header.frame_id);
+                                fragments =
+                                    vec![None; video_header.fragment_count as usize];
+                                received_count = 0;
+                                current_is_keyframe = video_header.is_keyframe;
+                                current_timestamp = video_header.timestamp_us;
+                            }
+
+                            let idx = video_header.fragment_idx as usize;
+                            if idx < fragments.len() && fragments[idx].is_none() {
+                                let fragment_payload = &payload
+                                    [hyperlink_protocol::video::VIDEO_FRAME_HEADER_SIZE..];
+                                fragments[idx] = Some(fragment_payload.to_vec());
+                                received_count += 1;
+
+                                if received_count == fragments.len() {
+                                    let mut full_frame = Vec::new();
+                                    for f in fragments.iter().flatten() {
+                                        full_frame.extend_from_slice(f);
+                                    }
+
+                                    #[cfg(feature = "video")]
+                                    if let Some(sender) = crate::UI_SENDER.get() {
+                                        let _ =
+                                            sender.send(crate::VideoGuiMessage::Frame {
+                                                data: full_frame,
+                                                timestamp_us: current_timestamp,
+                                                is_keyframe: current_is_keyframe,
+                                            });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    );
 
     // Accept bidirectional streams (the client opens the control plane stream).
     loop {

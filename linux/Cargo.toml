@@ -5,6 +5,10 @@ edition = "2021"
 description = "HyperLink Linux host application — see docs/SYSTEM_DESIGN.md"
 license = "Apache-2.0"
 
+[features]
+default = []
+video = ["dep:gtk4", "dep:libadwaita", "dep:gstreamer", "dep:gstreamer-video", "dep:gstreamer-app"]
+
 [dependencies]
 hyperlink-protocol = { path = "../protocol" }
 quinn = "0.11"
@@ -19,7 +23,16 @@ rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 rustls-pki-types = "1"
 clap = { version = "4", features = ["derive"] }
+bytes = "1"
+
+# Optional video/UI dependencies (require system libs: libgtk-4-dev, libadwaita-1-dev, gstreamer dev packages)
+gtk4 = { version = "0.9", optional = true }
+libadwaita = { version = "0.7", optional = true }
+gstreamer = { version = "0.23", optional = true }
+gstreamer-video = { version = "0.23", optional = true }
+gstreamer-app = { version = "0.23", optional = true }
 
 [[bin]]
 name = "hyperlink-linux"
 path = "src/main.rs"
+

@@ -6,6 +6,11 @@
 mod connection;
 mod discovery;
 
+#[cfg(feature = "video")]
+mod video_pipeline;
+#[cfg(feature = "video")]
+mod video_window;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -76,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!();
     println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║           HyperLink Host Daemon — Phase 1               ║");
+    println!("║           HyperLink Host Daemon — Phase 2               ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
     println!("  Device Name:   {}", host_config.device_name);
@@ -93,16 +98,124 @@ async fn main() -> anyhow::Result<()> {
     println!();
 
     // Start the server and wait for connections.
-    tokio::select! {
-        res = connection::start_server(cli.bind, host_config, config_path, cli.pair) => {
-            if let Err(e) = res {
-                error!("server failed: {}", e);
+    #[cfg(feature = "video")]
+    {
+        run_with_gui(cli.bind, host_config, config_path, cli.pair)?;
+    }
+    #[cfg(not(feature = "video"))]
+    {
+        tokio::select! {
+            res = connection::start_server(cli.bind, host_config, config_path, cli.pair) => {
+                if let Err(e) = res {
+                    error!("server failed: {}", e);
+                }
             }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            info!("shutting down server daemon");
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutting down server daemon");
+            }
         }
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "video")]
+pub enum VideoGuiMessage {
+    Config {
+        sps: Vec<u8>,
+        pps: Vec<u8>,
+    },
+    Frame {
+        data: Vec<u8>,
+        timestamp_us: u64,
+        is_keyframe: bool,
+    },
+}
+
+#[cfg(feature = "video")]
+pub static UI_SENDER: std::sync::OnceLock<gtk4::glib::Sender<VideoGuiMessage>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "video")]
+fn run_with_gui(
+    cli_bind: SocketAddr,
+    host_config: DeviceConfig,
+    config_path: PathBuf,
+    is_pairing: bool,
+) -> anyhow::Result<()> {
+    use gtk4::prelude::*;
+    use gtk4::Application;
+
+    let app = Application::builder()
+        .application_id("com.hyperlink.host")
+        .build();
+
+    app.connect_activate(move |app| {
+        let (sender, receiver) =
+            gtk4::glib::MainContext::channel::<VideoGuiMessage>(gtk4::glib::Priority::default());
+        if UI_SENDER.set(sender).is_err() {
+            error!("failed to initialize UI_SENDER");
+        }
+
+        let mut pipeline_opt: Option<video_pipeline::VideoPipeline> = None;
+        let mut window_opt: Option<libadwaita::ApplicationWindow> = None;
+
+        let app_clone = app.clone();
+        receiver.attach(None, move |msg| {
+            match msg {
+                VideoGuiMessage::Config { sps, pps } => {
+                    if pipeline_opt.is_none() {
+                        match video_pipeline::VideoPipeline::new(true) {
+                            Ok(pipeline) => match pipeline.paintable() {
+                                Ok(paintable) => {
+                                    let window =
+                                        video_window::create_video_window(&app_clone, &paintable);
+                                    window_opt = Some(window);
+                                    pipeline_opt = Some(pipeline);
+                                }
+                                Err(e) => {
+                                    error!("failed to get paintable from video pipeline: {}", e)
+                                }
+                            },
+                            Err(e) => error!("failed to create video pipeline: {}", e),
+                        }
+                    }
+                    if let Some(ref pipeline) = pipeline_opt {
+                        pipeline.set_codec_data(&sps, &pps);
+                        let _ = pipeline.start();
+                    }
+                }
+                VideoGuiMessage::Frame {
+                    data,
+                    timestamp_us,
+                    is_keyframe,
+                } => {
+                    if let Some(ref mut pipeline) = pipeline_opt {
+                        pipeline.push_frame(&data, timestamp_us, is_keyframe);
+                        if let Some(ref window) = window_opt {
+                            let fps = 30.0;
+                            let bitrate_kbps = (data.len() * 8 * 30 / 1000) as u32;
+                            video_window::update_stats_label(window, fps, bitrate_kbps, 0.0);
+                        }
+                    }
+                }
+            }
+            gtk4::glib::ControlFlow::Continue
+        });
+    });
+
+    // Spawn QUIC server in background thread using dedicated Tokio runtime
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            if let Err(e) =
+                connection::start_server(cli_bind, host_config, config_path, is_pairing).await
+            {
+                error!("server failed: {}", e);
+            }
+        });
+    });
+
+    app.run_with_args(&[""]);
     Ok(())
 }
