@@ -15,3 +15,4 @@ pub mod echo;
 pub mod message;
 pub mod metrics;
 pub mod version;
+pub mod video;

@@ -23,9 +23,14 @@ pub enum MessageType {
     EchoResponse = 0x11,
     /// Keepalive heartbeat (bidirectional).
     Heartbeat = 0x20,
-    // --- Phase 1+: reserved ranges ---
-    // 0x30–0x3F: video stream messages
-    // 0x40–0x4F: input stream messages
+    // --- Phase 2: video stream messages (0x30–0x3F) ---
+    /// Encoded H.264 video frame (phone → host, unreliable datagram).
+    VideoFrame = 0x30,
+    /// Codec configuration: SPS/PPS + encoder params (phone → host, reliable).
+    VideoConfig = 0x31,
+    /// Receiver bitrate feedback (host → phone, reliable).
+    BitrateAck = 0x32,
+    // 0x40–0x4F: input stream messages (Phase 3)
     // 0x50–0x5F: control-plane messages (notifications, clipboard)
     /// Client initiates pairing and sends its name (client → server).
     PairRequest = 0x50,
@@ -44,6 +49,9 @@ impl TryFrom<u8> for MessageType {
             0x10 => Ok(Self::EchoRequest),
             0x11 => Ok(Self::EchoResponse),
             0x20 => Ok(Self::Heartbeat),
+            0x30 => Ok(Self::VideoFrame),
+            0x31 => Ok(Self::VideoConfig),
+            0x32 => Ok(Self::BitrateAck),
             0x50 => Ok(Self::PairRequest),
             0x51 => Ok(Self::PairResponse),
             other => Err(other),
@@ -59,6 +67,9 @@ impl std::fmt::Display for MessageType {
             Self::EchoRequest => write!(f, "EchoRequest"),
             Self::EchoResponse => write!(f, "EchoResponse"),
             Self::Heartbeat => write!(f, "Heartbeat"),
+            Self::VideoFrame => write!(f, "VideoFrame"),
+            Self::VideoConfig => write!(f, "VideoConfig"),
+            Self::BitrateAck => write!(f, "BitrateAck"),
             Self::PairRequest => write!(f, "PairRequest"),
             Self::PairResponse => write!(f, "PairResponse"),
         }
@@ -77,6 +88,9 @@ mod tests {
             MessageType::EchoRequest,
             MessageType::EchoResponse,
             MessageType::Heartbeat,
+            MessageType::VideoFrame,
+            MessageType::VideoConfig,
+            MessageType::BitrateAck,
             MessageType::PairRequest,
             MessageType::PairResponse,
         ];
