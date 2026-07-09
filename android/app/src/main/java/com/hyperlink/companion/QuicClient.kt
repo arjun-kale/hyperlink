@@ -29,6 +29,8 @@ object QuicClient {
     private external fun confirmPairing(): Boolean
     private external fun sendMessage(payload: ByteArray): Boolean
     private external fun pollEvent(): String?
+    private external fun sendVideoFrame(frameData: ByteArray, frameId: Int, timestampUs: Long, isKeyframe: Boolean, width: Int, height: Int): Boolean
+    private external fun sendVideoConfig(sps: ByteArray, pps: ByteArray, bitrate: Int, fps: Int): Boolean
 
     // --- Kotlin Wrapper Logic ---
     interface EventListener {
@@ -36,6 +38,7 @@ object QuicClient {
         fun onConnected()
         fun onDisconnected(reason: String)
         fun onMessage(streamType: Byte, payload: ByteArray)
+        fun onVideoStreamReady()
     }
 
     private var listener: EventListener? = null
@@ -78,6 +81,14 @@ object QuicClient {
         return sendMessage(payload)
     }
 
+    fun sendFrame(frameData: ByteArray, frameId: Int, timestampUs: Long, isKeyframe: Boolean, width: Int, height: Int): Boolean {
+        return sendVideoFrame(frameData, frameId, timestampUs, isKeyframe, width, height)
+    }
+
+    fun sendConfig(sps: ByteArray, pps: ByteArray, bitrate: Int, fps: Int): Boolean {
+        return sendVideoConfig(sps, pps, bitrate, fps)
+    }
+
     private fun startPollingLoop() {
         pollJob?.cancel()
         pollJob = scope.launch {
@@ -106,6 +117,9 @@ object QuicClient {
                                 val hexStr = json.optString("payload")
                                 val payload = hexStringToByteArray(hexStr)
                                 listener?.onMessage(streamType, payload)
+                            }
+                            "video_ready" -> {
+                                listener?.onVideoStreamReady()
                             }
                         }
                     } catch (e: Exception) {

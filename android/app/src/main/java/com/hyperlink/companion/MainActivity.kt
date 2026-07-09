@@ -1,10 +1,13 @@
 package com.hyperlink.companion
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.projection.MediaProjectionManager
 import android.os.Bundle
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -17,6 +20,11 @@ import android.widget.TextView
 import android.widget.Toast
 
 class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.EventListener {
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val REQUEST_MEDIA_PROJECTION = 1001
+    }
+
     private lateinit var statusText: TextView
     private lateinit var scanButton: Button
     private lateinit var hostsContainer: LinearLayout
@@ -26,6 +34,8 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     private lateinit var controlContainer: LinearLayout
     private lateinit var messageInput: EditText
     private lateinit var sendButton: Button
+    private lateinit var startMirrorButton: Button
+    private lateinit var stopMirrorButton: Button
     private lateinit var logsText: TextView
 
     private lateinit var discoveryManager: DiscoveryManager
@@ -160,6 +170,25 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
                 setOnClickListener { sendMessageFlow() }
             }
             addView(sendButton, margin(0, 12, 0, 0))
+
+            // -- Mirroring Controls --
+            addView(TextView(this@MainActivity).apply {
+                text = "Screen Mirroring"
+                textColor(Color.parseColor("#00E5FF"))
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+            }, margin(0, 16, 0, 0))
+
+            startMirrorButton = createAccentButton("Start Mirroring").apply {
+                setOnClickListener { requestScreenCapture() }
+            }
+            addView(startMirrorButton, margin(0, 8, 0, 0))
+
+            stopMirrorButton = createAccentButton("Stop Mirroring").apply {
+                setOnClickListener { stopMirroring() }
+                visibility = View.GONE
+            }
+            addView(stopMirrorButton, margin(0, 8, 0, 0))
         }
         mainLayout.addView(controlContainer, margin(0, 16, 0, 0))
 
@@ -194,6 +223,24 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     override fun onDestroy() {
         super.onDestroy()
         discoveryManager.stopDiscovery()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_MEDIA_PROJECTION) {
+            if (resultCode == RESULT_OK && data != null) {
+                log("MediaProjection permission granted. Starting capture...")
+                ScreenCaptureService.start(this, resultCode, data)
+                runOnUiThread {
+                    startMirrorButton.visibility = View.GONE
+                    stopMirrorButton.visibility = View.VISIBLE
+                }
+            } else {
+                log("MediaProjection permission denied.")
+                Toast.makeText(this, "Screen capture permission denied", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     // --- UI Layout Helpers ---
@@ -288,6 +335,22 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
             togglePairingCard(false)
         } else {
             Toast.makeText(this, "Failed to confirm pairing", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun requestScreenCapture() {
+        val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        @Suppress("DEPRECATION")
+        startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
+        log("Requesting screen capture permission...")
+    }
+
+    private fun stopMirroring() {
+        ScreenCaptureService.stop(this)
+        log("Screen mirroring stopped.")
+        runOnUiThread {
+            startMirrorButton.visibility = View.VISIBLE
+            stopMirrorButton.visibility = View.GONE
         }
     }
 
@@ -391,5 +454,10 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     override fun onMessage(streamType: Byte, payload: ByteArray) {
         val txt = String(payload)
         log("← echoed: $txt")
+    }
+
+    override fun onVideoStreamReady() {
+        Log.i(TAG, "Video stream ready event received")
+        log("Video stream ready — host is accepting video.")
     }
 }

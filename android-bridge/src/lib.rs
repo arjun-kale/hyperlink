@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jint, jstring};
+use jni::sys::{jboolean, jint, jlong, jstring};
 use jni::JNIEnv;
 use lazy_static::lazy_static;
 use tokio::runtime::Runtime;
@@ -40,6 +40,8 @@ pub enum ClientEvent {
     Disconnected(String),
     /// Heartbeat or message received.
     MessageReceived(u8, Vec<u8>),
+    /// Video stream ready to accept frames.
+    VideoStreamReady,
 }
 
 /// Global mutable state for the client.
@@ -51,6 +53,7 @@ struct ClientState {
     event_rx: Option<mpsc::UnboundedReceiver<ClientEvent>>,
     event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
     control_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    connection: Option<quinn::Connection>,
 }
 
 /// Helper to push events to the JNI queue.
@@ -226,6 +229,7 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_pollEvent(
                             stream_type, hex
                         )
                     }
+                    ClientEvent::VideoStreamReady => "{\"type\":\"video_ready\"}".to_string(),
                 };
                 let jstr = env.new_string(json).unwrap();
                 jstr.into_raw()
@@ -279,6 +283,8 @@ async fn run_connection_task(
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
     transport.keep_alive_interval(Some(Duration::from_secs(3)));
+    transport.datagram_receive_buffer_size(Some(65536 * 8));
+    transport.datagram_send_buffer_size(65536 * 8);
     client_config.transport_config(Arc::new(transport));
 
     // Create endpoint.
@@ -331,6 +337,11 @@ async fn run_connection_task(
     {
         let mut state = CLIENT_STATE.lock().unwrap();
         state.control_tx = Some(control_tx);
+        state.connection = Some(connection.clone());
+    }
+
+    if !is_pairing {
+        emit_event(ClientEvent::VideoStreamReady);
     }
 
     // Spawn write loop.
@@ -383,4 +394,154 @@ async fn run_connection_task(
     }
 
     Ok(())
+}
+
+/// Send an encoded video frame over QUIC datagrams, fragmenting it if necessary.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_sendVideoFrame(
+    env: JNIEnv,
+    _class: JClass,
+    frame_data: JByteArray,
+    frame_id: jint,
+    timestamp_us: jlong,
+    is_keyframe: jboolean,
+    width: jint,
+    height: jint,
+) -> jboolean {
+    let frame_bytes = match env.convert_byte_array(&frame_data) {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    let frame_id = frame_id as u32;
+    let timestamp_us = timestamp_us as u64;
+    let is_keyframe = is_keyframe != 0;
+    let width = width as u16;
+    let height = height as u16;
+
+    let state = CLIENT_STATE.lock().unwrap();
+    let conn = match &state.connection {
+        Some(c) => c.clone(),
+        None => return 0,
+    };
+
+    // Fragment large video frame payloads to fit inside MTU datagram limit.
+    let max_fragment_size = 1000;
+    let total_len = frame_bytes.len();
+    let fragment_count = total_len.div_ceil(max_fragment_size).max(1);
+
+    for fragment_idx in 0..fragment_count {
+        let start = fragment_idx * max_fragment_size;
+        let end = (start + max_fragment_size).min(total_len);
+        let fragment_payload = &frame_bytes[start..end];
+
+        let video_header = hyperlink_protocol::video::VideoFrameHeader {
+            frame_id,
+            timestamp_us,
+            is_keyframe,
+            width,
+            height,
+            payload_len: fragment_payload.len() as u32,
+            fragment_idx: fragment_idx as u16,
+            fragment_count: fragment_count as u16,
+        };
+
+        // Serialize video header + fragment data.
+        let mut video_buf = Vec::new();
+        if video_header.encode(&mut video_buf).is_err() {
+            return 0;
+        }
+        video_buf.extend_from_slice(fragment_payload);
+
+        // Serialize HyperLink Packet Header.
+        let hl_header = hyperlink_protocol::version::Header::new(
+            hyperlink_protocol::message::MessageType::VideoFrame,
+            video_buf.len() as u32,
+        );
+        let mut packet_buf = hl_header.to_bytes().to_vec();
+        packet_buf.extend_from_slice(&video_buf);
+
+        // Send as QUIC datagram
+        if let Err(e) = conn.send_datagram(bytes::Bytes::from(packet_buf)) {
+            warn!("failed to send video frame datagram fragment: {}", e);
+            return 0;
+        }
+    }
+
+    1 // true
+}
+
+/// Send video configuration (SPS/PPS) over a reliable unidirectional stream.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_sendVideoConfig(
+    env: JNIEnv,
+    _class: JClass,
+    sps: JByteArray,
+    pps: JByteArray,
+    bitrate: jint,
+    fps: jint,
+) -> jboolean {
+    let sps_bytes = match env.convert_byte_array(&sps) {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    let pps_bytes = match env.convert_byte_array(&pps) {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    let bitrate_bps = bitrate as u32;
+    let fps = fps as u8;
+
+    let state = CLIENT_STATE.lock().unwrap();
+    let conn = match &state.connection {
+        Some(c) => c.clone(),
+        None => return 0,
+    };
+
+    // Serialize VideoConfig.
+    let config = hyperlink_protocol::video::VideoConfig {
+        sps: sps_bytes,
+        pps: pps_bytes,
+        bitrate_bps,
+        fps,
+    };
+    let mut config_buf = Vec::new();
+    if config.encode(&mut config_buf).is_err() {
+        return 0;
+    }
+
+    // Serialize HyperLink Packet Header.
+    let hl_header = hyperlink_protocol::version::Header::new(
+        hyperlink_protocol::message::MessageType::VideoConfig,
+        config_buf.len() as u32,
+    );
+    let mut packet_buf = hl_header.to_bytes().to_vec();
+    packet_buf.extend_from_slice(&config_buf);
+
+    // Spawn async task to open stream and transmit.
+    RUNTIME.spawn(async move {
+        match conn.open_uni().await {
+            Ok(mut send_stream) => {
+                // Write the stream type byte (0x31 = Video Config) first.
+                if let Err(e) = send_stream.write_all(&[0x31]).await {
+                    warn!("failed to write video config stream type: {}", e);
+                    return;
+                }
+                // Write the header + payload.
+                if let Err(e) = send_stream.write_all(&packet_buf).await {
+                    warn!("failed to write video config payload: {}", e);
+                    return;
+                }
+                let _ = send_stream.finish();
+                info!("successfully sent video config stream");
+            }
+            Err(e) => {
+                warn!(
+                    "failed to open unidirectional stream for video config: {}",
+                    e
+                );
+            }
+        }
+    });
+
+    1 // true
 }
