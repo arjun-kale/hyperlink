@@ -19,10 +19,9 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: clippy, rustfmt
+        run: |
+          rustup toolchain install stable --component clippy rustfmt
+          rustup default stable
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
