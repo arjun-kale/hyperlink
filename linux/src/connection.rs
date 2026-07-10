@@ -223,9 +223,7 @@ async fn handle_incoming_connection(
             let mut current_timestamp = 0u64;
 
             while let Ok(datagram) = conn_dg.read_datagram().await {
-                if let Ok(hl_header) =
-                    hyperlink_protocol::version::Header::decode(&datagram)
-                {
+                if let Ok(hl_header) = hyperlink_protocol::version::Header::decode(&datagram) {
                     if hl_header.message_type
                         == hyperlink_protocol::message::MessageType::VideoFrame
                     {
@@ -243,8 +241,7 @@ async fn handle_incoming_connection(
 
                             if current_frame_id != Some(video_header.frame_id) {
                                 current_frame_id = Some(video_header.frame_id);
-                                fragments =
-                                    vec![None; video_header.fragment_count as usize];
+                                fragments = vec![None; video_header.fragment_count as usize];
                                 received_count = 0;
                                 current_is_keyframe = video_header.is_keyframe;
                                 current_timestamp = video_header.timestamp_us;
@@ -252,8 +249,8 @@ async fn handle_incoming_connection(
 
                             let idx = video_header.fragment_idx as usize;
                             if idx < fragments.len() && fragments[idx].is_none() {
-                                let fragment_payload = &payload
-                                    [hyperlink_protocol::video::VIDEO_FRAME_HEADER_SIZE..];
+                                let fragment_payload =
+                                    &payload[hyperlink_protocol::video::VIDEO_FRAME_HEADER_SIZE..];
                                 fragments[idx] = Some(fragment_payload.to_vec());
                                 received_count += 1;
 
@@ -265,12 +262,11 @@ async fn handle_incoming_connection(
 
                                     #[cfg(feature = "video")]
                                     if let Some(sender) = crate::UI_SENDER.get() {
-                                        let _ =
-                                            sender.send(crate::VideoGuiMessage::Frame {
-                                                data: full_frame,
-                                                timestamp_us: current_timestamp,
-                                                is_keyframe: current_is_keyframe,
-                                            });
+                                        let _ = sender.send(crate::VideoGuiMessage::Frame {
+                                            data: full_frame,
+                                            timestamp_us: current_timestamp,
+                                            is_keyframe: current_is_keyframe,
+                                        });
                                     }
                                 }
                             }

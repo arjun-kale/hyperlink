@@ -20,7 +20,7 @@ jobs:
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --component clippy rustfmt
+          rustup toolchain install stable --component clippy --component rustfmt
           rustup default stable
       - name: Check formatting
         run: cargo fmt --all -- --check
