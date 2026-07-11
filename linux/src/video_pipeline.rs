@@ -108,7 +108,7 @@ impl VideoPipeline {
                 }
                 _ => {}
             }
-            gst::BusSyncReply::Pass.into()
+            gst::glib::ControlFlow::Continue
         })
         .context("failed to add bus watch")?;
 

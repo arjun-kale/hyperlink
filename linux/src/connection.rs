@@ -195,10 +195,12 @@ async fn handle_incoming_connection(
                                         );
                                         #[cfg(feature = "video")]
                                         if let Some(sender) = crate::UI_SENDER.get() {
-                                            let _ = sender.send(crate::VideoGuiMessage::Config {
-                                                sps: config.sps,
-                                                pps: config.pps,
-                                            });
+                                            let _ = sender
+                                                .send(crate::VideoGuiMessage::Config {
+                                                    sps: config.sps,
+                                                    pps: config.pps,
+                                                })
+                                                .await;
                                         }
                                     }
                                 }
@@ -262,11 +264,13 @@ async fn handle_incoming_connection(
 
                                     #[cfg(feature = "video")]
                                     if let Some(sender) = crate::UI_SENDER.get() {
-                                        let _ = sender.send(crate::VideoGuiMessage::Frame {
-                                            data: full_frame,
-                                            timestamp_us: current_timestamp,
-                                            is_keyframe: current_is_keyframe,
-                                        });
+                                        let _ = sender
+                                            .send(crate::VideoGuiMessage::Frame {
+                                                data: full_frame,
+                                                timestamp_us: current_timestamp,
+                                                is_keyframe: current_is_keyframe,
+                                            })
+                                            .await;
                                     }
                                 }
                             }

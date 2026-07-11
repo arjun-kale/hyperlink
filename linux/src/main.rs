@@ -133,7 +133,7 @@ pub enum VideoGuiMessage {
 }
 
 #[cfg(feature = "video")]
-pub static UI_SENDER: std::sync::OnceLock<gtk4::glib::Sender<VideoGuiMessage>> =
+pub static UI_SENDER: std::sync::OnceLock<async_channel::Sender<VideoGuiMessage>> =
     std::sync::OnceLock::new();
 
 #[cfg(feature = "video")]
@@ -151,56 +151,57 @@ fn run_with_gui(
         .build();
 
     app.connect_activate(move |app| {
-        let (sender, receiver) =
-            gtk4::glib::MainContext::channel::<VideoGuiMessage>(gtk4::glib::Priority::default());
+        let (sender, receiver) = async_channel::unbounded::<VideoGuiMessage>();
         if UI_SENDER.set(sender).is_err() {
             error!("failed to initialize UI_SENDER");
         }
 
-        let mut pipeline_opt: Option<video_pipeline::VideoPipeline> = None;
-        let mut window_opt: Option<libadwaita::ApplicationWindow> = None;
-
         let app_clone = app.clone();
-        receiver.attach(None, move |msg| {
-            match msg {
-                VideoGuiMessage::Config { sps, pps } => {
-                    if pipeline_opt.is_none() {
-                        match video_pipeline::VideoPipeline::new(true) {
-                            Ok(pipeline) => match pipeline.paintable() {
-                                Ok(paintable) => {
-                                    let window =
-                                        video_window::create_video_window(&app_clone, &paintable);
-                                    window_opt = Some(window);
-                                    pipeline_opt = Some(pipeline);
-                                }
-                                Err(e) => {
-                                    error!("failed to get paintable from video pipeline: {}", e)
-                                }
-                            },
-                            Err(e) => error!("failed to create video pipeline: {}", e),
+        gtk4::glib::spawn_future_local(async move {
+            let mut pipeline_opt: Option<video_pipeline::VideoPipeline> = None;
+            let mut window_opt: Option<libadwaita::ApplicationWindow> = None;
+
+            while let Ok(msg) = receiver.recv().await {
+                match msg {
+                    VideoGuiMessage::Config { sps, pps } => {
+                        if pipeline_opt.is_none() {
+                            match video_pipeline::VideoPipeline::new(true) {
+                                Ok(pipeline) => match pipeline.paintable() {
+                                    Ok(paintable) => {
+                                        let window = video_window::create_video_window(
+                                            &app_clone, &paintable,
+                                        );
+                                        window_opt = Some(window);
+                                        pipeline_opt = Some(pipeline);
+                                    }
+                                    Err(e) => {
+                                        error!("failed to get paintable from video pipeline: {}", e)
+                                    }
+                                },
+                                Err(e) => error!("failed to create video pipeline: {}", e),
+                            }
+                        }
+                        if let Some(ref pipeline) = pipeline_opt {
+                            pipeline.set_codec_data(&sps, &pps);
+                            let _ = pipeline.start();
                         }
                     }
-                    if let Some(ref pipeline) = pipeline_opt {
-                        pipeline.set_codec_data(&sps, &pps);
-                        let _ = pipeline.start();
-                    }
-                }
-                VideoGuiMessage::Frame {
-                    data,
-                    timestamp_us,
-                    is_keyframe,
-                } => {
-                    if let Some(ref mut pipeline) = pipeline_opt {
-                        pipeline.push_frame(&data, timestamp_us, is_keyframe);
-                        if let Some(ref window) = window_opt {
-                            let fps = 30.0;
-                            let bitrate_kbps = (data.len() * 8 * 30 / 1000) as u32;
-                            video_window::update_stats_label(window, fps, bitrate_kbps, 0.0);
+                    VideoGuiMessage::Frame {
+                        data,
+                        timestamp_us,
+                        is_keyframe,
+                    } => {
+                        if let Some(ref mut pipeline) = pipeline_opt {
+                            pipeline.push_frame(&data, timestamp_us, is_keyframe);
+                            if let Some(ref window) = window_opt {
+                                let fps = 30.0;
+                                let bitrate_kbps = (data.len() * 8 * 30 / 1000) as u32;
+                                video_window::update_stats_label(window, fps, bitrate_kbps, 0.0);
+                            }
                         }
                     }
                 }
             }
-            gtk4::glib::ControlFlow::Continue
         });
     });
 
