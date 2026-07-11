@@ -21,6 +21,7 @@ pub struct VideoPipeline {
     appsrc: gst_app::AppSrc,
     frame_count: u64,
     base_pts: Option<u64>,
+    _bus_watch_guard: gst::bus::BusWatchGuard,
 }
 
 impl VideoPipeline {
@@ -85,38 +86,40 @@ impl VideoPipeline {
 
         // Set up error handling on the bus.
         let bus = pipeline.bus().unwrap();
-        bus.add_watch(move |_, msg| {
-            use gst::MessageView;
-            match msg.view() {
-                MessageView::Error(err) => {
-                    error!(
-                        "GStreamer error from {:?}: {} ({:?})",
-                        err.src().map(|s| s.path_string()),
-                        err.error(),
-                        err.debug()
-                    );
+        let bus_watch_guard = bus
+            .add_watch(move |_, msg| {
+                use gst::MessageView;
+                match msg.view() {
+                    MessageView::Error(err) => {
+                        error!(
+                            "GStreamer error from {:?}: {} ({:?})",
+                            err.src().map(|s| s.path_string()),
+                            err.error(),
+                            err.debug()
+                        );
+                    }
+                    MessageView::Warning(warn) => {
+                        warn!(
+                            "GStreamer warning from {:?}: {}",
+                            warn.src().map(|s| s.path_string()),
+                            warn.error()
+                        );
+                    }
+                    MessageView::Eos(_) => {
+                        info!("GStreamer pipeline reached end-of-stream");
+                    }
+                    _ => {}
                 }
-                MessageView::Warning(warn) => {
-                    warn!(
-                        "GStreamer warning from {:?}: {}",
-                        warn.src().map(|s| s.path_string()),
-                        warn.error()
-                    );
-                }
-                MessageView::Eos(_) => {
-                    info!("GStreamer pipeline reached end-of-stream");
-                }
-                _ => {}
-            }
-            gst::glib::ControlFlow::Continue
-        })
-        .context("failed to add bus watch")?;
+                gst::glib::ControlFlow::Continue
+            })
+            .context("failed to add bus watch")?;
 
         Ok(Self {
             pipeline,
             appsrc,
             frame_count: 0,
             base_pts: None,
+            _bus_watch_guard: bus_watch_guard,
         })
     }
 
@@ -245,6 +248,7 @@ impl VideoPipeline {
     }
 
     /// Returns the total number of frames pushed so far.
+    #[allow(dead_code)] // TODO(phase 2 stats overlay): wire into main.rs once real FPS tracking replaces the hardcoded 30.0
     pub fn frame_count(&self) -> u64 {
         self.frame_count
     }
@@ -252,6 +256,6 @@ impl VideoPipeline {
 
 impl Drop for VideoPipeline {
     fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        let _ = self.stop();
     }
 }

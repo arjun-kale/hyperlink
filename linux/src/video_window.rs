@@ -5,7 +5,6 @@
 //! Creates a GTK4 application window with a `Picture` widget that renders
 //! the decoded video from the GStreamer pipeline's paintable sink.
 
-use gtk4::prelude::*;
 use gtk4::{self, gdk, Application, EventControllerKey, Picture};
 use libadwaita::prelude::*;
 use libadwaita::{self as adw, ApplicationWindow, HeaderBar};
