@@ -22,6 +22,14 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Cursor};
 
+/// Returns the current UNIX timestamp in microseconds.
+pub fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
 /// Clock synchronization request sent from client to server.
 ///
 /// Contains the client's send timestamp (`t1`) and a sequence number
