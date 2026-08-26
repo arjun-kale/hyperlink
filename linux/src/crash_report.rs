@@ -63,7 +63,10 @@ pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
 }
 
-fn write_report(reports_dir: &Path, info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<PathBuf> {
+fn write_report(
+    reports_dir: &Path,
+    info: &std::panic::PanicHookInfo<'_>,
+) -> std::io::Result<PathBuf> {
     fs::create_dir_all(reports_dir)?;
 
     let now = std::time::SystemTime::now()

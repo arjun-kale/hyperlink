@@ -1650,8 +1650,8 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_getOwnFing
     let Some(config) = config else {
         return std::ptr::null_mut();
     };
-    let Ok(certs) = rustls_pemfile::certs(&mut config.cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
+    let Ok(certs) =
+        rustls_pemfile::certs(&mut config.cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()
     else {
         return std::ptr::null_mut();
     };

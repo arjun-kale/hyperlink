@@ -64,7 +64,10 @@ fn add_feature_switch(
     get: impl Fn(&HostPreferences) -> bool + 'static,
     set: impl Fn(&mut HostPreferences, bool) + 'static,
 ) {
-    let row = adw::ActionRow::builder().title(title).subtitle(subtitle).build();
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .build();
 
     let initial = get(&config.lock().unwrap().preferences);
     let switch = gtk4::Switch::builder()
@@ -88,7 +91,10 @@ fn add_feature_switch(
     group.add(&row);
 }
 
-fn build_features_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) -> adw::PreferencesPage {
+fn build_features_page(
+    config: &Arc<Mutex<DeviceConfig>>,
+    config_path: &PathBuf,
+) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Features")
         .icon_name("preferences-system-symbolic")
@@ -100,29 +106,49 @@ fn build_features_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf)
         .build();
 
     add_feature_switch(
-        &group, "Video Mirroring", "Mirror the phone's screen to this window",
-        config, config_path,
-        |p| p.enable_video, |p, v| p.enable_video = v,
+        &group,
+        "Video Mirroring",
+        "Mirror the phone's screen to this window",
+        config,
+        config_path,
+        |p| p.enable_video,
+        |p, v| p.enable_video = v,
     );
     add_feature_switch(
-        &group, "Input Injection", "Send keyboard, mouse, and touch input to the phone",
-        config, config_path,
-        |p| p.enable_input, |p, v| p.enable_input = v,
+        &group,
+        "Input Injection",
+        "Send keyboard, mouse, and touch input to the phone",
+        config,
+        config_path,
+        |p| p.enable_input,
+        |p, v| p.enable_input = v,
     );
     add_feature_switch(
-        &group, "Notifications", "Mirror phone notifications to the desktop",
-        config, config_path,
-        |p| p.enable_notifications, |p, v| p.enable_notifications = v,
+        &group,
+        "Notifications",
+        "Mirror phone notifications to the desktop",
+        config,
+        config_path,
+        |p| p.enable_notifications,
+        |p, v| p.enable_notifications = v,
     );
     add_feature_switch(
-        &group, "Clipboard Sync", "Share the system clipboard in both directions",
-        config, config_path,
-        |p| p.enable_clipboard, |p, v| p.enable_clipboard = v,
+        &group,
+        "Clipboard Sync",
+        "Share the system clipboard in both directions",
+        config,
+        config_path,
+        |p| p.enable_clipboard,
+        |p, v| p.enable_clipboard = v,
     );
     add_feature_switch(
-        &group, "File Access", "Mount the phone's storage as a local virtual filesystem",
-        config, config_path,
-        |p| p.enable_file_access, |p, v| p.enable_file_access = v,
+        &group,
+        "File Access",
+        "Mount the phone's storage as a local virtual filesystem",
+        config,
+        config_path,
+        |p| p.enable_file_access,
+        |p, v| p.enable_file_access = v,
     );
     add_feature_switch(
         &group, "Proximity Pre-Warm", "Opportunistically pre-warm reconnects — never bypasses certificate authentication (see docs/SECURITY_REVIEW.md)",
@@ -134,7 +160,10 @@ fn build_features_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf)
     page
 }
 
-fn build_bandwidth_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) -> adw::PreferencesPage {
+fn build_bandwidth_page(
+    config: &Arc<Mutex<DeviceConfig>>,
+    config_path: &PathBuf,
+) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Bandwidth")
         .icon_name("network-wireless-symbolic")
@@ -150,7 +179,12 @@ fn build_bandwidth_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf
         .subtitle("0 = unlimited (encoder default)")
         .build();
 
-    let current_kbps = config.lock().unwrap().preferences.max_bitrate_kbps.unwrap_or(0);
+    let current_kbps = config
+        .lock()
+        .unwrap()
+        .preferences
+        .max_bitrate_kbps
+        .unwrap_or(0);
     let spin = gtk4::SpinButton::with_range(0.0, 20_000.0, 250.0);
     spin.set_value(current_kbps as f64);
     spin.set_digits(0);
@@ -174,7 +208,10 @@ fn build_bandwidth_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf
     page
 }
 
-fn build_privacy_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) -> adw::PreferencesPage {
+fn build_privacy_page(
+    config: &Arc<Mutex<DeviceConfig>>,
+    config_path: &PathBuf,
+) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Privacy & Diagnostics")
         .icon_name("dialog-information-symbolic")
@@ -187,9 +224,13 @@ fn build_privacy_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) 
         .build();
 
     add_feature_switch(
-        &crash_group, "Save Local Crash Reports", "Write a redacted report to ~/.local/share/hyperlink/crash_reports on a crash",
-        config, config_path,
-        |p| p.crash_reporting_enabled, |p, v| p.crash_reporting_enabled = v,
+        &crash_group,
+        "Save Local Crash Reports",
+        "Write a redacted report to ~/.local/share/hyperlink/crash_reports on a crash",
+        config,
+        config_path,
+        |p| p.crash_reporting_enabled,
+        |p, v| p.crash_reporting_enabled = v,
     );
 
     // Wire the toggle to the live panic hook too, so it takes effect immediately
@@ -199,7 +240,11 @@ fn build_privacy_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) 
         // Re-find the switch we just added isn't straightforward without keeping a
         // handle, so mirror the current on-disk value into the live hook once here;
         // subsequent toggles are propagated via crash_report::set_enabled below.
-        let enabled_now = config_for_live.lock().unwrap().preferences.crash_reporting_enabled;
+        let enabled_now = config_for_live
+            .lock()
+            .unwrap()
+            .preferences
+            .crash_reporting_enabled;
         crate::crash_report::set_enabled(enabled_now);
     }
 
@@ -214,7 +259,9 @@ fn build_privacy_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) 
     open_btn.set_tooltip_text(Some("Open reports folder"));
     let reports_dir_open = reports_dir.clone();
     open_btn.connect_clicked(move |_| {
-        let _ = std::process::Command::new("xdg-open").arg(&reports_dir_open).spawn();
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&reports_dir_open)
+            .spawn();
     });
 
     let clear_btn = gtk4::Button::from_icon_name("user-trash-symbolic");
@@ -239,9 +286,13 @@ fn build_privacy_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) 
         .build();
 
     add_feature_switch(
-        &update_group, "Check for Updates", "Periodically check whether a newer release is available",
-        config, config_path,
-        |p| p.update_check_enabled, |p, v| p.update_check_enabled = v,
+        &update_group,
+        "Check for Updates",
+        "Periodically check whether a newer release is available",
+        config,
+        config_path,
+        |p| p.update_check_enabled,
+        |p, v| p.update_check_enabled = v,
     );
 
     let check_row = adw::ActionRow::builder()
@@ -258,7 +309,9 @@ fn build_privacy_page(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) 
         gtk4::glib::spawn_future_local(async move {
             let result = crate::update_check::check_for_update(env!("CARGO_PKG_VERSION")).await;
             let text = match (&result.latest_version, result.update_available) {
-                (Some(latest), true) => format!("{} (update available: {latest})", result.current_version),
+                (Some(latest), true) => {
+                    format!("{} (update available: {latest})", result.current_version)
+                }
                 (Some(_), false) => format!("{} (up to date)", result.current_version),
                 (None, _) => format!("{} (check failed — offline?)", result.current_version),
             };

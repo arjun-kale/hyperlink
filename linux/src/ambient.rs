@@ -221,10 +221,7 @@ impl AmbientContextAgent {
         }
 
         if !status_summaries.is_empty() {
-            answer_lines.push(format!(
-                "\nDevice Telemetry ({}):",
-                status_summaries.len()
-            ));
+            answer_lines.push(format!("\nDevice Telemetry ({}):", status_summaries.len()));
             answer_lines.extend(status_summaries);
         }
 
