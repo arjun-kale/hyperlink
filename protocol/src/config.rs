@@ -18,6 +18,57 @@ pub struct DeviceConfig {
     pub key_pem: String,
     /// Trusted peer fingerprints map (device_name -> hex fingerprint).
     pub trusted_peers: HashMap<String, String>,
+    /// Per-feature enable/disable toggles and bandwidth limit (Phase 11 preferences).
+    /// `#[serde(default)]` so config files written before this field existed keep loading.
+    #[serde(default)]
+    pub preferences: HostPreferences,
+}
+
+/// User-configurable feature toggles and limits, edited via the Libadwaita
+/// preferences window and read at connection/session start.
+///
+/// These are intentionally *not* hot-reloaded into an already-open connection —
+/// a change here takes effect the next time a session starts, which is called
+/// out in the preferences window UI rather than silently assumed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HostPreferences {
+    /// Mirror video from the phone.
+    pub enable_video: bool,
+    /// Accept keyboard/mouse/touch input events destined for the phone.
+    pub enable_input: bool,
+    /// Mirror phone notifications to the desktop.
+    pub enable_notifications: bool,
+    /// Sync the system clipboard in both directions.
+    pub enable_clipboard: bool,
+    /// Mount the phone's storage as a local virtual filesystem.
+    pub enable_file_access: bool,
+    /// Opportunistically pre-warm reconnects based on proximity signals.
+    pub enable_proximity_prewarm: bool,
+    /// Cap the video encoder's target bitrate. `None` means no cap (encoder default).
+    pub max_bitrate_kbps: Option<u32>,
+    /// Write local, redacted crash reports on panic (see `docs/SECURITY_REVIEW.md`
+    /// for exactly what is and isn't included). Never transmitted anywhere —
+    /// this only controls whether a report is written to disk for the user's
+    /// own troubleshooting / to attach to a bug report themselves.
+    pub crash_reporting_enabled: bool,
+    /// Periodically check (not auto-install) whether a newer release exists.
+    pub update_check_enabled: bool,
+}
+
+impl Default for HostPreferences {
+    fn default() -> Self {
+        Self {
+            enable_video: true,
+            enable_input: true,
+            enable_notifications: true,
+            enable_clipboard: true,
+            enable_file_access: true,
+            enable_proximity_prewarm: true,
+            max_bitrate_kbps: None,
+            crash_reporting_enabled: true,
+            update_check_enabled: true,
+        }
+    }
 }
 
 impl DeviceConfig {
@@ -48,6 +99,7 @@ impl DeviceConfig {
             cert_pem: cert.pem(),
             key_pem: signing_key.serialize_pem(),
             trusted_peers: HashMap::new(),
+            preferences: HostPreferences::default(),
         })
     }
 
@@ -110,5 +162,29 @@ mod tests {
         let reloaded = DeviceConfig::load_or_create(&path, "ignored-name").unwrap();
         assert_eq!(reloaded.device_name, "test-device");
         assert_eq!(reloaded.trusted_peers.get("peer-1").unwrap(), "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF");
+        assert_eq!(reloaded.preferences, HostPreferences::default());
+    }
+
+    /// A config.json written before `HostPreferences` existed (Phase 0-10) must still
+    /// load — `#[serde(default)]` on `preferences` is what makes that true.
+    #[test]
+    fn pre_phase11_config_without_preferences_field_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let legacy_json = r#"{
+            "device_name": "old-desktop",
+            "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+            "key_pem": "-----BEGIN PRIVATE KEY-----\nMIGH\n-----END PRIVATE KEY-----\n",
+            "trusted_peers": {"phone-1": "AA:BB"}
+        }"#;
+        fs::write(&path, legacy_json).unwrap();
+
+        let loaded = DeviceConfig::load_or_create(&path, "ignored-name").unwrap();
+        assert_eq!(loaded.device_name, "old-desktop");
+        assert_eq!(loaded.trusted_peers.get("phone-1").unwrap(), "AA:BB");
+        // Missing field falls back to defaults rather than failing to parse.
+        assert_eq!(loaded.preferences, HostPreferences::default());
+        assert!(loaded.preferences.crash_reporting_enabled);
     }
 }
