@@ -110,6 +110,15 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rustls 0.23 requires an explicit process-level CryptoProvider — without this,
+    // the first TLS operation (the QUIC handshake) panics at runtime. cargo test
+    // never caught this because protocol/src/crypto.rs's test installs one itself;
+    // the real binary never did. Confirmed by actually running the daemon, not by
+    // `cargo build`/`cargo test`, which don't exercise this path at all.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring CryptoProvider");
+
     // Initialize structured logging.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -298,6 +307,16 @@ fn run_with_gui(
     let config_path_for_gui = config_path.clone();
 
     app.connect_activate(move |app| {
+        // GApplication's main loop exits as soon as activation finishes if there's
+        // no window open and nothing holding it — and no window exists yet here,
+        // since the mirror window is only created later once a phone actually
+        // connects (VideoGuiMessage::Config). Without this, the whole daemon
+        // process would start, print its banner, and exit within milliseconds on
+        // every real run — confirmed by actually running it; `cargo build`/`cargo
+        // test` never exercise the GTK main loop at all. Leaked deliberately: this
+        // is a long-running daemon, held open for the life of the process.
+        std::mem::forget(app.hold());
+
         let (sender, receiver) = async_channel::unbounded::<VideoGuiMessage>();
         if UI_SENDER.set(sender).is_err() {
             error!("failed to initialize UI_SENDER");
