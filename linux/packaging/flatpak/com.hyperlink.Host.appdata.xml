@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.hyperlink.Host</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>HyperLink</name>
+  <summary>Mirror and control a paired Samsung phone from Linux</summary>
+  <description>
+    <p>
+      HyperLink turns a Samsung phone and a Linux desktop into one continuous
+      compute surface over a single low-latency QUIC tunnel — mirrored
+      display, shared input, notifications, clipboard, and files — without
+      depending on a closed vendor protocol or a cloud account.
+    </p>
+    <p>
+      Pairing uses Trust-On-First-Use certificate pinning confirmed by a
+      6-digit PIN shown on both devices; no account sign-in is required.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.hyperlink.Host.desktop</launchable>
+  <content_rating type="oars-1.1" />
+  <url type="homepage">https://github.com/hyperlink-project/hyperlink</url>
+  <url type="vcs-browser">https://github.com/hyperlink-project/hyperlink</url>
+  <releases>
+    <release version="0.2.0" date="2026-08-26">
+      <description>
+        <p>Phases 1-11: pairing, video mirroring, input, notifications, clipboard, file access, network resilience, proximity pre-warm, app-state handoff, ambient context agent, and production packaging.</p>
+      </description>
+    </release>
+  </releases>
+</component>

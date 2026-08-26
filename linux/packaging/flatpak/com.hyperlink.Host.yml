@@ -1,0 +1,71 @@
+# Flatpak manifest for the HyperLink Linux host (GUI build).
+#
+# STATUS: written but not yet build-verified in this repo — flatpak-builder
+# was not available in the environment this was authored in. Before shipping,
+# a maintainer needs to:
+#
+#   1. Generate the offline cargo sources file (flatpak-builder builds without
+#      network access, so crates.io downloads must be pre-vendored):
+#        pip install aiohttp toml
+#        curl -O https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+#        python3 flatpak-cargo-generator.py ../../../Cargo.lock -o cargo-sources.json
+#      (cargo-sources.json is intentionally not committed — it's large,
+#      generated, and goes stale every time Cargo.lock changes.)
+#
+#   2. Build + install locally to test:
+#        flatpak-builder --user --install --force-clean build-dir com.hyperlink.Host.yml
+#
+#   3. Only once that succeeds should this be pointed at a real Flathub (or
+#      other) submission — this manifest has not been through that process.
+#
+# GNOME 46 runtime ships libadwaita 1.5+ / GTK 4.14+, both newer than the
+# `v4_8`/`v1_2` binding feature floors pinned in linux/Cargo.toml.
+
+app-id: com.hyperlink.Host
+runtime: org.gnome.Platform
+runtime-version: '46'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: hyperlink-linux
+
+finish-args:
+  # Network: mDNS discovery + the QUIC tunnel to the paired phone.
+  - --share=network
+  # GPU decode (VAAPI) for the video mirror pipeline, plus GTK4/Wayland.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # /dev/fuse for the Phase 6 virtual file mount. Flatpak's FUSE portal path
+  # is preferred long-term; --device=all is a placeholder until the mount
+  # logic is ported to go through xdg-desktop-portal's Document/FUSE portal
+  # instead of talking to /dev/fuse directly.
+  - --device=all
+  # Desktop notification fallback (notify-send) when the mirror window isn't
+  # focused, and xdg-open for Phase 9 handoff launches.
+  - --talk-name=org.freedesktop.Notifications
+  - --system-talk-name=org.freedesktop.Flatpak
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/hyperlink-host/cargo
+
+modules:
+  - name: hyperlink-host
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release -p hyperlink-linux --features video
+      - install -Dm755 target/release/hyperlink-linux /app/bin/hyperlink-linux
+      - install -Dm644 packaging/flatpak/com.hyperlink.Host.desktop
+        /app/share/applications/com.hyperlink.Host.desktop
+      - install -Dm644 packaging/flatpak/com.hyperlink.Host.appdata.xml
+        /app/share/metainfo/com.hyperlink.Host.appdata.xml
+    sources:
+      - type: dir
+        path: ../../..
+      # Generated in step 1 above — not committed to this repo.
+      - cargo-sources.json

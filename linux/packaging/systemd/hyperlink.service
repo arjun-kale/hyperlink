@@ -1,0 +1,45 @@
+# HyperLink host daemon — systemd user service.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp linux/packaging/systemd/hyperlink.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hyperlink.service
+#
+# Logs:
+#   journalctl --user -u hyperlink.service -f
+#
+# This unit runs the headless (non-GUI) daemon binary — i.e. `hyperlink-linux`
+# built WITHOUT the `video` feature. The GUI build (with the mirror window,
+# preferences window, and notification toasts) is meant to be launched as a
+# normal desktop application, not as a background service; running both at
+# once would race for the same QUIC bind port.
+
+[Unit]
+Description=HyperLink host daemon (device-union protocol)
+Documentation=https://github.com/hyperlink-project/hyperlink
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hyperlink-linux
+Restart=on-failure
+RestartSec=5
+# The daemon keeps its own persistent state (device cert/key, trusted peers,
+# workflow state, ambient event journal) under ~/.config and ~/.local/share —
+# nothing here needs a dedicated state directory beyond the user's own home.
+Environment=RUST_LOG=info
+
+# Hardening. Left conservative because the process needs network access,
+# a home-directory config/data path, and (for file-mount sessions) access
+# to /dev/fuse — this is a user session daemon, not a system service, so
+# most kernel-level sandboxing directives are intentionally omitted.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/hyperlink %h/.local/share/hyperlink
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
