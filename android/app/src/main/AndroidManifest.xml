@@ -5,8 +5,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
+        android:name=".HyperLinkApplication"
         android:label="HyperLink"
         android:allowBackup="false"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
@@ -25,6 +29,60 @@
             android:name="com.hyperlink.companion.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <service
+            android:name="com.hyperlink.companion.InputService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <service
+            android:name="com.hyperlink.companion.NotificationService"
+            android:label="HyperLink Notification Listener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!--
+          The three services below (Phase 8/9/10: proximity ranging, app-state
+          handoff, ambient context telemetry) were previously missing from the
+          manifest entirely — undeclared components can't be started or bound
+          on a real device, so those phases could not actually run despite the
+          Kotlin classes existing. This is a Phase 11 production-hardening fix,
+          not new functionality; the classes themselves are unchanged.
+        -->
+        <service
+            android:name="com.hyperlink.companion.ProximityRangingService"
+            android:exported="false" />
+
+        <service
+            android:name="com.hyperlink.companion.HandoffService"
+            android:exported="false" />
+
+        <service
+            android:name="com.hyperlink.companion.AmbientContextProvider"
+            android:exported="false" />
+
+        <!-- Serves clipboard_received.png (from ClipboardService's cache dir) as a
+             content:// Uri to ClipboardManager for image clips received from the host. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

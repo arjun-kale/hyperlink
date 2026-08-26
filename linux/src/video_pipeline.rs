@@ -248,7 +248,7 @@ impl VideoPipeline {
     }
 
     /// Returns the total number of frames pushed so far.
-    #[allow(dead_code)] // TODO(phase 2 stats overlay): wire into main.rs once real FPS tracking replaces the hardcoded 30.0
+    #[allow(dead_code)]
     pub fn frame_count(&self) -> u64 {
         self.frame_count
     }

@@ -31,6 +31,19 @@ object QuicClient {
     private external fun pollEvent(): String?
     private external fun sendVideoFrame(frameData: ByteArray, frameId: Int, timestampUs: Long, isKeyframe: Boolean, width: Int, height: Int): Boolean
     private external fun sendVideoConfig(sps: ByteArray, pps: ByteArray, bitrate: Int, fps: Int): Boolean
+    private external fun sendNotificationPost(id: String, packageName: String, appName: String, title: String, body: String, timestampMs: Long, iconBytes: ByteArray?): Boolean
+    private external fun sendNotificationDismiss(id: String): Boolean
+    private external fun sendDndSync(enabled: Boolean): Boolean
+    private external fun sendClipboardText(originId: String, text: String): Boolean
+    private external fun sendClipboardImage(originId: String, mimeType: String, imageBytes: ByteArray): Boolean
+    external fun getOwnFingerprint(): String?
+    external fun sendProximityBeacon(certFp: String, technology: Int, distanceCm: Int, rssiDbm: Int, confidencePct: Int, nonce: Long): Boolean
+    external fun saveWorkflowState(width: Int, height: Int, packageName: String, orientation: Int): Boolean
+    external fun restoreWorkflowState(): Boolean
+    external fun sendHandoff(sessionId: Long, handoffType: Int, sourceOrigin: String, appId: String, uri: String, title: String, stateJson: String): Boolean
+    external fun acknowledgeHandoff(sessionId: Long, accepted: Boolean, statusCode: Int): Boolean
+    external fun publishAmbientEvent(eventId: Long, category: Int, source: String, summary: String, metadataJson: String): Boolean
+    external fun updateAgentConsent(allowNotifications: Boolean, allowScreenState: Boolean, allowForegroundApp: Boolean, allowDeviceStatus: Boolean, allowClipboard: Boolean, allowMediaState: Boolean, allowRawVideo: Boolean): Boolean
 
     // --- Kotlin Wrapper Logic ---
     interface EventListener {
@@ -39,6 +52,16 @@ object QuicClient {
         fun onDisconnected(reason: String)
         fun onMessage(streamType: Byte, payload: ByteArray)
         fun onVideoStreamReady()
+        fun onPointerEvent(action: Int, button: Int, xNorm: Int, yNorm: Int, pressure: Int) {}
+        fun onKeyEvent(action: Int, keycode: Int, modifiers: Int) {}
+        fun onScrollEvent(dx: Int, dy: Int, xNorm: Int, yNorm: Int) {}
+        fun onNavEvent(action: Int) {}
+        fun onNotificationAction(key: String, actionId: Int) {}
+        fun onNotificationDismiss(key: String) {}
+        fun onDndSync(enabled: Boolean) {}
+        fun onClipboardReceived(originId: String, contentType: Int, mimeType: String, payload: ByteArray) {}
+        fun onHandoffReceived(sessionId: Long, handoffType: Int, appId: String, uri: String, title: String, stateJson: String) {}
+        fun onAgentConsentUpdated(allowNotifications: Boolean, allowClipboard: Boolean, allowRawVideo: Boolean) {}
     }
 
     private var listener: EventListener? = null
@@ -89,6 +112,29 @@ object QuicClient {
         return sendVideoConfig(sps, pps, bitrate, fps)
     }
 
+    fun postNotification(id: String, packageName: String, appName: String, title: String, body: String, timestampMs: Long, iconBytes: ByteArray?): Boolean {
+        return sendNotificationPost(id, packageName, appName, title, body, timestampMs, iconBytes)
+    }
+
+    fun dismissNotification(id: String): Boolean {
+        return sendNotificationDismiss(id)
+    }
+
+    fun syncDnd(enabled: Boolean): Boolean {
+        return sendDndSync(enabled)
+    }
+
+    fun postClipboardText(originId: String, text: String): Boolean {
+        return sendClipboardText(originId, text)
+    }
+
+    fun postClipboardImage(originId: String, mimeType: String, imageBytes: ByteArray): Boolean {
+        return sendClipboardImage(originId, mimeType, imageBytes)
+    }
+
+    /** This device's own certificate fingerprint, for [ProximityRangingService] to broadcast. */
+    fun ownFingerprint(): String? = getOwnFingerprint()
+
     private fun startPollingLoop() {
         pollJob?.cancel()
         pollJob = scope.launch {
@@ -120,6 +166,71 @@ object QuicClient {
                             }
                             "video_ready" -> {
                                 listener?.onVideoStreamReady()
+                            }
+                            "pointer" -> {
+                                val action = json.optInt("action")
+                                val button = json.optInt("button")
+                                val xNorm = json.optInt("x_norm")
+                                val yNorm = json.optInt("y_norm")
+                                val pressure = json.optInt("pressure")
+                                listener?.onPointerEvent(action, button, xNorm, yNorm, pressure)
+                            }
+                            "key" -> {
+                                val action = json.optInt("action")
+                                val keycode = json.optInt("keycode")
+                                val modifiers = json.optInt("modifiers")
+                                listener?.onKeyEvent(action, keycode, modifiers)
+                            }
+                            "scroll" -> {
+                                val dx = json.optInt("dx")
+                                val dy = json.optInt("dy")
+                                val xNorm = json.optInt("x_norm")
+                                val yNorm = json.optInt("y_norm")
+                                listener?.onScrollEvent(dx, dy, xNorm, yNorm)
+                            }
+                            "nav" -> {
+                                val action = json.optInt("action")
+                                listener?.onNavEvent(action)
+                            }
+                            "notif_action" -> {
+                                val key = json.optString("key")
+                                val actionId = json.optInt("action_id")
+                                listener?.onNotificationAction(key, actionId)
+                            }
+                            "notif_dismiss" -> {
+                                val key = json.optString("key")
+                                listener?.onNotificationDismiss(key)
+                            }
+                            "dnd_sync" -> {
+                                val enabled = json.optBoolean("enabled")
+                                listener?.onDndSync(enabled)
+                            }
+                            "clipboard" -> {
+                                val originId = json.optString("origin_id")
+                                val contentType = json.optInt("content_type")
+                                val mimeType = json.optString("mime_type")
+                                val dataB64 = json.optString("data_b64")
+                                val payload = if (dataB64.isNotEmpty()) {
+                                    android.util.Base64.decode(dataB64, android.util.Base64.DEFAULT)
+                                } else {
+                                    ByteArray(0)
+                                }
+                                listener?.onClipboardReceived(originId, contentType, mimeType, payload)
+                            }
+                            "handoff" -> {
+                                val sessionId = json.optLong("session_id")
+                                val handoffType = json.optInt("handoff_type")
+                                val appId = json.optString("app_id")
+                                val uri = json.optString("uri")
+                                val title = json.optString("title")
+                                val stateJson = json.optString("state_json")
+                                listener?.onHandoffReceived(sessionId, handoffType, appId, uri, title, stateJson)
+                            }
+                            "agent_consent" -> {
+                                val allowNotifications = json.optBoolean("allow_notifications")
+                                val allowClipboard = json.optBoolean("allow_clipboard")
+                                val allowRawVideo = json.optBoolean("allow_raw_video")
+                                listener?.onAgentConsentUpdated(allowNotifications, allowClipboard, allowRawVideo)
                             }
                         }
                     } catch (e: Exception) {

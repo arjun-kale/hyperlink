@@ -8,11 +8,19 @@
 //!
 //! FlatBuffers (hot-path) and Protobuf (control-plane) schemas arrive in Phase 1.
 
+pub mod ambient;
+pub mod clipboard;
 pub mod clock;
 pub mod config;
 pub mod crypto;
 pub mod echo;
+pub mod file_access;
+pub mod handoff;
+pub mod input;
 pub mod message;
 pub mod metrics;
+pub mod notification;
+pub mod proximity;
+pub mod resilience;
 pub mod version;
 pub mod video;

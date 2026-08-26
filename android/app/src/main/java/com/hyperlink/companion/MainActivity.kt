@@ -1,12 +1,16 @@
 package com.hyperlink.companion
 
 import android.app.Activity
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
 import android.os.Bundle
+import android.os.IBinder
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -42,12 +46,60 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     private val discoveredHosts = mutableMapOf<String, Pair<String, Int>>()
     private var isScanning = false
 
+    // Phase 8/9/10 background services — real `Service()` subclasses (unlike
+    // ClipboardService/FileAccessService/NetworkMonitorService above, which are
+    // plain classes instantiated directly), so they're bound rather than `init()`'d.
+    private var proximityService: ProximityRangingService? = null
+    private var handoffService: HandoffService? = null
+    private var ambientService: AmbientContextProvider? = null
+
+    private val proximityConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            proximityService = (binder as? ProximityRangingService.LocalBinder)?.getService()
+            log("ProximityRangingService bound")
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            proximityService = null
+        }
+    }
+
+    private val handoffConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            handoffService = (binder as? HandoffService.LocalBinder)?.getService()
+            log("HandoffService bound")
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            handoffService = null
+        }
+    }
+
+    private val ambientConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            ambientService = (binder as? AmbientContextProvider.LocalBinder)?.getService()
+            log("AmbientContextProvider bound")
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            ambientService = null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
         // Initialize Core Clients
         discoveryManager = DiscoveryManager(this, this)
         QuicClient.init(this, this)
+        ClipboardService.init(this).start()
+        FileAccessService.init(this)
+        NetworkMonitorService.init(this)
+
+        // Bind Phase 8/9/10 services. BIND_AUTO_CREATE starts them if not already
+        // running, so AmbientContextProvider's telemetry receiver (registered in its
+        // own onCreate) is live for the whole activity lifetime — publish calls are
+        // harmless no-ops on the Rust side until a connection actually exists.
+        bindService(Intent(this, ProximityRangingService::class.java), proximityConnection, Context.BIND_AUTO_CREATE)
+        bindService(Intent(this, HandoffService::class.java), handoffConnection, Context.BIND_AUTO_CREATE)
+        bindService(Intent(this, AmbientContextProvider::class.java), ambientConnection, Context.BIND_AUTO_CREATE)
 
         // Programmatically Build Premium Dark Theme UI
         val mainLayout = LinearLayout(this).apply {
@@ -189,6 +241,44 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
                 visibility = View.GONE
             }
             addView(stopMirrorButton, margin(0, 8, 0, 0))
+
+            val notifPermButton = createSecondaryButton("Notification & DND Permissions").apply {
+                setOnClickListener {
+                    val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    if (!nm.isNotificationPolicyAccessGranted) {
+                        startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
+                    } else {
+                        startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    }
+                }
+            }
+            addView(notifPermButton, margin(0, 8, 0, 0))
+
+            val filePermButton = createSecondaryButton("Storage & File Permissions").apply {
+                setOnClickListener {
+                    FileAccessService.requestStoragePermission(this@MainActivity)
+                }
+            }
+            addView(filePermButton, margin(0, 8, 0, 0))
+
+            val multipathButton = createSecondaryButton("Network Multipath Status").apply {
+                setOnClickListener {
+                    val activePath = try {
+                        NetworkMonitorService.getActivePath()
+                    } catch (e: Exception) {
+                        0
+                    }
+                    val pathName = when (activePath) {
+                        0 -> "Wi-Fi Primary (5GHz/6GHz)"
+                        1 -> "Cellular Tether"
+                        2 -> "Ethernet"
+                        3 -> "Wi-Fi MLO Secondary"
+                        else -> "Unknown"
+                    }
+                    log("Active Network Path: $pathName (id=$activePath)")
+                }
+            }
+            addView(multipathButton, margin(0, 8, 0, 0))
         }
         mainLayout.addView(controlContainer, margin(0, 16, 0, 0))
 
@@ -222,7 +312,12 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
 
     override fun onDestroy() {
         super.onDestroy()
+        ClipboardService.instance?.stop()
         discoveryManager.stopDiscovery()
+        proximityService?.stopRanging()
+        unbindService(proximityConnection)
+        unbindService(handoffConnection)
+        unbindService(ambientConnection)
     }
 
     @Suppress("DEPRECATION")
@@ -287,6 +382,22 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
             setPadding(dp(16), dp(4), dp(16), dp(4))
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#00E5FF")) // Bright Teal button
+                cornerRadius = dp(8).toFloat()
+            }
+        }
+    }
+
+    private fun createSecondaryButton(btnText: String): Button {
+        return Button(this).apply {
+            text = btnText
+            setTextColor(Color.parseColor("#00E5FF"))
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke(dp(1), Color.parseColor("#00E5FF"))
                 cornerRadius = dp(8).toFloat()
             }
         }
@@ -362,7 +473,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
                 log("→ sent: $msg")
                 messageInput.setText("")
             } else {
-                log("❌ send failed (control channel inactive)")
+                log("send failed (control channel inactive)")
             }
         }
     }
@@ -439,6 +550,18 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
             togglePairingCard(false)
             toggleControlCard(true)
         }
+
+        val fingerprint = try {
+            QuicClient.ownFingerprint()
+        } catch (e: Exception) {
+            null
+        }
+        if (fingerprint != null) {
+            proximityService?.startRanging(fingerprint)
+            log("Proximity pre-warm ranging started")
+        } else {
+            log("Proximity pre-warm not started: own fingerprint unavailable")
+        }
     }
 
     override fun onDisconnected(reason: String) {
@@ -449,6 +572,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
             togglePairingCard(false)
             toggleControlCard(false)
         }
+        proximityService?.stopRanging()
     }
 
     override fun onMessage(streamType: Byte, payload: ByteArray) {
@@ -459,5 +583,108 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     override fun onVideoStreamReady() {
         Log.i(TAG, "Video stream ready event received")
         log("Video stream ready — host is accepting video.")
+    }
+
+    private var dragStartXNorm: Int = 0
+    private var dragStartYNorm: Int = 0
+    private var dragStartTimeMs: Long = 0L
+    private var isDragging: Boolean = false
+
+    override fun onPointerEvent(action: Int, button: Int, xNorm: Int, yNorm: Int, pressure: Int) {
+        val service = InputService.instance
+        if (service == null) {
+            Log.d(TAG, "Input event dropped: InputService accessibility service not enabled")
+            return
+        }
+
+        when (action) {
+            1 -> { // Down
+                dragStartXNorm = xNorm
+                dragStartYNorm = yNorm
+                dragStartTimeMs = System.currentTimeMillis()
+                isDragging = true
+            }
+            3 -> { // Move
+                // Pointer motion tracking
+            }
+            2 -> { // Up
+                if (isDragging) {
+                    val dx = Math.abs(xNorm - dragStartXNorm)
+                    val dy = Math.abs(yNorm - dragStartYNorm)
+                    val duration = (System.currentTimeMillis() - dragStartTimeMs).coerceIn(50L, 500L)
+                    // If moved beyond ~1.5% of normalized screen dimension, treat as swipe/drag
+                    if (dx > 1000 || dy > 1000) {
+                        service.injectSwipe(dragStartXNorm, dragStartYNorm, xNorm, yNorm, duration)
+                    } else {
+                        service.injectTap(dragStartXNorm, dragStartYNorm)
+                    }
+                    isDragging = false
+                }
+            }
+            4 -> { // Cancel
+                isDragging = false
+            }
+        }
+    }
+
+    override fun onKeyEvent(action: Int, keycode: Int, modifiers: Int) {
+        InputService.instance?.injectKey(action, keycode, modifiers)
+    }
+
+    override fun onScrollEvent(dx: Int, dy: Int, xNorm: Int, yNorm: Int) {
+        InputService.instance?.injectScroll(dy, xNorm, yNorm)
+    }
+
+    override fun onNavEvent(action: Int) {
+        InputService.instance?.injectNavAction(action)
+    }
+
+    override fun onNotificationAction(key: String, actionId: Int) {
+        log("Triggering notification action $actionId on $key")
+        NotificationService.instance?.invokeAction(key, actionId)
+    }
+
+    override fun onNotificationDismiss(key: String) {
+        log("Dismissing notification $key from host")
+        NotificationService.instance?.dismiss(key)
+    }
+
+    override fun onDndSync(enabled: Boolean) {
+        log("DND sync received from host: enabled=$enabled")
+        val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        if (nm.isNotificationPolicyAccessGranted) {
+            val filter = if (enabled) {
+                android.app.NotificationManager.INTERRUPTION_FILTER_PRIORITY
+            } else {
+                android.app.NotificationManager.INTERRUPTION_FILTER_ALL
+            }
+            nm.setInterruptionFilter(filter)
+            log("Phone DND filter set to: ${if (enabled) "PRIORITY (active)" else "ALL (inactive)"}")
+        } else {
+            log("DND sync: Notification Policy access not granted on device; enable in Settings")
+        }
+    }
+
+    override fun onClipboardReceived(originId: String, contentType: Int, mimeType: String, payload: ByteArray) {
+        log("Clipboard item received from $originId (type=$contentType, mime=$mimeType, size=${payload.size})")
+        ClipboardService.instance?.writeRemoteClip(originId, contentType, mimeType, payload)
+    }
+
+    override fun onHandoffReceived(sessionId: Long, handoffType: Int, appId: String, uri: String, title: String, stateJson: String) {
+        log("Handoff received from host: type=$handoffType title=\"$title\"")
+        val service = handoffService
+        if (service == null) {
+            Log.w(TAG, "Handoff dropped: HandoffService not bound yet")
+            return
+        }
+        service.handleIncomingHandoff(this, sessionId, handoffType, appId, uri, title, stateJson)
+    }
+
+    override fun onAgentConsentUpdated(allowNotifications: Boolean, allowClipboard: Boolean, allowRawVideo: Boolean) {
+        // The ambient-agent consent policy is enforced host-side (AgentConsentPolicy
+        // gates AmbientEventBus::query in linux/src/ambient.rs) — this device has no
+        // local policy store to update yet. Logged so a host-initiated policy push is
+        // at least visible on the phone rather than silently discarded.
+        log("Host updated agent consent: notifications=$allowNotifications clipboard=$allowClipboard rawVideo=$allowRawVideo")
     }
 }
