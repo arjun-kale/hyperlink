@@ -14,7 +14,7 @@
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 use libadwaita::{self as adw, ApplicationWindow};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{error, info};
 
@@ -46,7 +46,7 @@ pub fn show_preferences_window(parent: &ApplicationWindow, config_path: PathBuf)
     window.present();
 }
 
-fn save(config: &Arc<Mutex<DeviceConfig>>, config_path: &PathBuf) {
+fn save(config: &Arc<Mutex<DeviceConfig>>, config_path: &Path) {
     let guard = config.lock().unwrap();
     if let Err(e) = guard.save(config_path) {
         error!(error = %e, path = %config_path.display(), "failed to save preferences");
@@ -60,7 +60,7 @@ fn add_feature_switch(
     title: &str,
     subtitle: &str,
     config: &Arc<Mutex<DeviceConfig>>,
-    config_path: &PathBuf,
+    config_path: &Path,
     get: impl Fn(&HostPreferences) -> bool + 'static,
     set: impl Fn(&mut HostPreferences, bool) + 'static,
 ) {
@@ -76,7 +76,7 @@ fn add_feature_switch(
         .build();
 
     let config_clone = config.clone();
-    let config_path_clone = config_path.clone();
+    let config_path_clone = config_path.to_path_buf();
     switch.connect_state_set(move |_, active| {
         {
             let mut guard = config_clone.lock().unwrap();
@@ -93,7 +93,7 @@ fn add_feature_switch(
 
 fn build_features_page(
     config: &Arc<Mutex<DeviceConfig>>,
-    config_path: &PathBuf,
+    config_path: &Path,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Features")
@@ -162,7 +162,7 @@ fn build_features_page(
 
 fn build_bandwidth_page(
     config: &Arc<Mutex<DeviceConfig>>,
-    config_path: &PathBuf,
+    config_path: &Path,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Bandwidth")
@@ -190,7 +190,7 @@ fn build_bandwidth_page(
     spin.set_digits(0);
 
     let config_clone = config.clone();
-    let config_path_clone = config_path.clone();
+    let config_path_clone = config_path.to_path_buf();
     spin.connect_value_changed(move |sb| {
         let kbps = sb.value().round() as u32;
         {
@@ -210,7 +210,7 @@ fn build_bandwidth_page(
 
 fn build_privacy_page(
     config: &Arc<Mutex<DeviceConfig>>,
-    config_path: &PathBuf,
+    config_path: &Path,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Privacy & Diagnostics")
@@ -328,7 +328,7 @@ fn build_privacy_page(
 
 fn build_devices_page(
     config: &Arc<Mutex<DeviceConfig>>,
-    config_path: &PathBuf,
+    config_path: &Path,
     window: &adw::PreferencesWindow,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
@@ -369,7 +369,7 @@ fn build_devices_page(
         remove_btn.set_tooltip_text(Some("Revoke trust for this device"));
 
         let config_clone = config.clone();
-        let config_path_clone = config_path.clone();
+        let config_path_clone = config_path.to_path_buf();
         let name_clone = name.clone();
         let window_clone = window.clone();
         let row_clone = row.clone();
