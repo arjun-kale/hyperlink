@@ -14,6 +14,12 @@ build/
 *.apk
 *.aab
 
+# Release signing — never commit real keystores or credentials.
+# See android/keystore.properties.example.
+android/keystore.properties
+*.keystore
+*.jks
+
 # General
 .DS_Store
 *.log
