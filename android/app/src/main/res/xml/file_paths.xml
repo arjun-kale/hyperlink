@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paths this app's FileProvider is willing to serve as content:// URIs.
+  Only the app's own cache directory is exposed — that's where
+  ClipboardService writes clipboard_received.png before handing it to
+  ClipboardManager, and nothing else needs to be reachable this way.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="clipboard_cache" path="." />
+</paths>
