@@ -760,7 +760,18 @@ async fn run_connection_task(
     config: DeviceConfig,
     _event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
 ) -> anyhow::Result<()> {
-    let addr: SocketAddr = format!("{}:{}", host_ip, port).parse()?;
+    // IPv6 literals need bracketing to be an unambiguous SocketAddr string — an
+    // unbracketed "fe80::1:9900" is unparseable (which of those colons is the
+    // port separator?). Confirmed on a real device: Android's mDNS resolution
+    // can hand back an IPv6 link-local address, and the unbracketed format!()
+    // that used to be here failed with exactly this "invalid socket address
+    // syntax" on a real pairing attempt.
+    let host_port = if host_ip.contains(':') {
+        format!("[{host_ip}]:{port}")
+    } else {
+        format!("{host_ip}:{port}")
+    };
+    let addr: SocketAddr = host_port.parse()?;
 
     // Load certs.
     let client_certs =
