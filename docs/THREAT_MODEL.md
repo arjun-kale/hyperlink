@@ -28,3 +28,12 @@ This is tracked from day one so security isn't retrofitted — formalized fully,
 ## Out of Scope (for now)
 - Multi-user / multi-device pairing (single phone ⇄ single host assumed initially)
 - Formal third-party security audit — planned before any public 1.0 release, not before
+
+## Phase 11 Code-Level Review
+
+A code-level (not third-party) review of the pairing/mTLS handshake
+specifically, done as part of Phase 11 production hardening, lives in
+[`docs/SECURITY_REVIEW.md`](SECURITY_REVIEW.md) — it traces the actual
+pairing-confirmation code path rather than restating this document's
+policy-level table, and lists concrete findings plus what a follow-up
+third-party pen-test should prioritize.

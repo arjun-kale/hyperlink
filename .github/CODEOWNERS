@@ -1,0 +1,3 @@
+# Default owner for everything in the repo, unless a later, more specific
+# rule below overrides it. See https://docs.github.com/articles/about-codeowners
+* @arjun-kale

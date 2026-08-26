@@ -1,6 +1,6 @@
-# Project HyperLink — System Design & Phased Build Plan
+# HyperLink — System Design & Phased Build Plan
 ### Linux ⇄ Samsung Ultra-Low-Latency Device Union
-Spec version: 0.1 — Author: Arjun — For: coding agent execution
+Spec version: 0.1
 
 ---
 
@@ -17,12 +17,12 @@ Every phase after Phase 0 must report its numbers against the bench harness buil
 **One-line vision:** HyperLink turns a Samsung phone and a Linux desktop into one continuous compute surface — mirrored display, shared input, shared clipboard/notifications/files, and (later) shared compute — over a single custom low-latency link, without depending on Microsoft or Samsung's closed protocols.
 
 ### Explicit Non-Goals (scope discipline — read this before writing any code)
-These were tempting in early brainstorming and are **deliberately excluded** because they are not honestly buildable as first described:
-- ❌ Raw GPU framebuffer access on Android — not exposed to third-party apps at any privilege level below custom firmware. We use MediaProjection + hardware encode instead.
-- ❌ Kernel-level "sub-1ms" bypass without root/custom firmware — not available on stock Samsung devices. We optimize within Android's real APIs.
-- ❌ Full Samsung DeX-style third-party app windowing — relies on undocumented OEM hooks. Out of scope permanently unless Samsung publishes an SDK.
-- ❌ Universal app-state handoff for arbitrary third-party apps — requires their cooperation (same limit Apple's Handoff has). We support our own surfaces + a documented opt-in contract, not magic universal support.
-- ❌ Skipping real authentication because a device is "nearby" (UWB proximity) — proximity may *pre-warm* a connection, never *substitute for* a cryptographic auth check.
+These were tempting in early brainstorming and are deliberately excluded because they are not honestly buildable as first described:
+- Raw GPU framebuffer access on Android — not exposed to third-party apps at any privilege level below custom firmware. We use MediaProjection + hardware encode instead.
+- Kernel-level "sub-1ms" bypass without root/custom firmware — not available on stock Samsung devices. We optimize within Android's real APIs.
+- Full Samsung DeX-style third-party app windowing — relies on undocumented OEM hooks. Out of scope permanently unless Samsung publishes an SDK.
+- Universal app-state handoff for arbitrary third-party apps — requires their cooperation (same limit Apple's Handoff has). We support our own surfaces plus a documented opt-in contract, not magic universal support.
+- Skipping real authentication because a device is "nearby" (UWB proximity) — proximity may pre-warm a connection, never substitute for a cryptographic auth check.
 
 ### Target Hardware Assumptions
 - Linux desktop/laptop: modern GPU with VAAPI or NVDEC (Intel/AMD/NVIDIA), USB-C, WiFi 6E/7 recommended but not required
@@ -64,7 +64,7 @@ HyperLink/
 |---|---|---|
 | Transport | QUIC (TLS 1.3 built-in) | Stream multiplexing without head-of-line blocking; one big file transfer won't stall video frames |
 | Linux language | Rust | GC pauses / GIL stalls directly ruin tail latency; this is the one place it's non-negotiable |
-| Linux UI | GTK4 + Libadwaita | Matches your existing Glass Stickies design language; native paintable sink for GStreamer |
+| Linux UI | GTK4 + Libadwaita | Native GNOME look and feel; native paintable sink for GStreamer |
 | Android language | Kotlin | Standard, full API access to MediaProjection/MediaCodec/NotificationListenerService |
 | Video codec | H.264 baseline (HEVC/AV1 as later optimization) | Hardware encode/decode ubiquity now; revisit AV1 once H.264 path is proven |
 | Serialization | FlatBuffers (video/input path), Protobuf (control-plane) | Zero-copy where latency matters; protobuf's ergonomics fine for a notification payload |
@@ -82,7 +82,7 @@ HyperLink/
 Tasks:
 - Set up monorepo structure (`protocol/`, `android/`, `linux/`, `bench/`, `docs/`)
 - Define protocol versioning strategy (a version byte in the handshake, from day one — retrofitting this later is painful)
-- Build `samyoga-bench`: a clock-sync handshake (NTP-style round-trip offset calculation) between phone and host, since cross-device latency measurement is meaningless without synchronized clocks
+- Build `hyperlink-bench`: a clock-sync handshake (NTP-style round-trip offset calculation) between phone and host, since cross-device latency measurement is meaningless without synchronized clocks
 - Build a minimal echo tool: timestamp → send → timestamp on receipt → report round-trip and estimated one-way latency
 - Define and document target metrics table (fill in real numbers once Phase 2/3 give you a baseline):
   - Video glass-to-glass latency (USB / 5GHz WiFi / 6GHz WiFi)
@@ -113,7 +113,7 @@ Tasks:
 - Android: MediaProjection capture → MediaCodec H.264 hardware encoder configured for low latency (zero B-frames, short GOP, CBR or capped VBR)
 - Chunk encoded frames onto the video stream (unreliable, drop-if-stale policy)
 - Linux: GStreamer pipeline, hardware decode (VAAPI/NVDEC depending on your GPU), render into a GTK4 paintable widget
-- Adaptive bitrate/resolution driven by live measurements from `samyoga-bench` (don't hardcode a bitrate — react to observed loss/jitter)
+- Adaptive bitrate/resolution driven by live measurements from `hyperlink-bench` (don't hardcode a bitrate — react to observed loss/jitter)
 
 **DoD:** measured glass-to-glass latency logged for USB and WiFi paths against concrete targets (suggested starting targets: <60ms USB, <100ms 5GHz WiFi — adjust once you have real hardware numbers). Frame drops under induced packet loss (test with `tc/netem`) degrade smoothly, no freeze/crash.
 
@@ -166,7 +166,7 @@ Tasks:
 ### Phase 7 — Network Resilience & Multipath
 Tasks:
 - WiFi 7 Multi-Link Operation (MLO) where hardware supports bonding 5GHz+6GHz — real 802.11be feature, not the document's "sub-1ms" claim, but genuinely lower jitter
-- Custom multi-path scheduler inside SAMYOGA (WiFi + phone cellular tether) — build your own rather than relying on Android's weak native MPTCP support
+- Custom multi-path scheduler (WiFi + phone cellular tether) — build our own rather than relying on Android's weak native MPTCP support
 - Automatic failover specifically prioritized for video/input streams (those can't tolerate a stall the way a file transfer can)
 - Feed failover events into the bench harness for visibility
 
@@ -187,21 +187,21 @@ Tasks:
 ### Phase 9 — Scoped App-State Handoff
 Tasks:
 - Define a documented intent/deep-link contract for state serialization
-- Implement for SAMYOGA's own companion surfaces first
+- Implement for HyperLink's own companion surfaces first
 - Publish the contract as something a third-party app *could* adopt (explicitly not universal — this is the honest version of "handoff")
 
 **DoD:** demonstrate handoff mid-task on at least one real flow (e.g., a note or browser tab) between phone and PC using the documented contract.
 
 ---
 
-### Phase 10 — Ambient Context Agent (the actual differentiator)
-This is the feature that separates SAMYOGA from being "just another Phone Link clone" — it leans into your multi-agent/agentic background rather than competing purely on mirroring quality.
+### Phase 10 — Ambient Context Agent (the differentiator)
+This is the feature that separates HyperLink from being another Phone Link clone — it leans into agentic tooling rather than competing purely on mirroring quality.
 
 Tasks:
 - Expose an internal event bus (notifications, screen-state metadata, clipboard events) that a desktop agent can subscribe to
 - Explicit per-category opt-in/consent gating — this handles personal/sensitive data, treat it accordingly
 - Sandbox the agent from raw video by default — metadata only unless the user explicitly grants more
-- Reference integration: a demo agent (e.g., using your existing LangGraph stack) that answers "what happened on my phone in the last hour"
+- Reference integration: a demo agent (e.g., a LangGraph agent or a local LLM daemon) that answers "what happened on my phone in the last hour"
 
 **DoD:** a working demo agent consuming the event bus end to end, with consent gating verified to actually block ungranted categories.
 
@@ -224,7 +224,7 @@ Tasks:
 ## 5. Cross-Cutting Concerns (apply in every phase, not a phase themselves)
 
 - **Security:** cert pinning after first pairing, replay protection on all control-plane messages, no auth-bypass path ever, a documented revocation/re-pair procedure
-- **Observability:** structured logs from Phase 0 onward; every phase reports its numbers through `samyoga-bench`, not ad hoc prints
+- **Observability:** structured logs from Phase 0 onward; every phase reports its numbers through `hyperlink-bench`, not ad hoc prints
 - **Protocol compatibility:** the version byte from Phase 1 must gate every subsequent protocol change
 - **Testing:** unit tests per component, plus an integration harness using `tc/netem` to simulate real-world packet loss and latency — test under bad network conditions, not just your desk WiFi
 
