@@ -215,6 +215,18 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_initialize
 ) {
     let storage_path: String = env.get_string(&storage_path).unwrap().into();
 
+    // rustls 0.23 requires an explicit process-level CryptoProvider before any TLS
+    // use — the same bug already found and fixed in linux/src/main.rs. Here it's
+    // worse to diagnose: the panic happens inside a tokio::spawn'd task
+    // (run_connection_task, via ClientConfig::builder()), so it doesn't crash the
+    // app — it silently kills just that task, and the raw panic message never
+    // reaches logcat (tracing-android only captures tracing:: calls, not the
+    // default panic hook's stderr output). Confirmed on a real device: pairing
+    // would hang forever on "Initiating connection..." with zero further log
+    // output on either side, and zero bytes ever reaching the host's UDP socket
+    // (checked via /proc/net/udp — rx_queue and drops both stayed 0).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialize android logger.
     #[cfg(target_os = "android")]
     {
