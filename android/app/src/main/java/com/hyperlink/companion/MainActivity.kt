@@ -508,7 +508,8 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
                 setOnClickListener {
                     log("Tapped host: $name. Initiating connection...")
                     connectingHostName = name
-                    // If not paired, connect in pairing mode first
+                    // Always allow pairing: the bridge only shows a PIN if the host's
+                    // certificate isn't already pinned, otherwise it connects normally.
                     QuicClient.connect(ip, port, isPairing = true)
                 }
             }

@@ -828,6 +828,20 @@ async fn run_connection_task(
     let connection = endpoint.connect(addr, "localhost")?.await?;
     info!("QUIC connection established!");
 
+    // The companion can't know which host it's talking to until the handshake has
+    // captured the peer certificate, so it always connects with `is_pairing` set.
+    // If that certificate turns out to already be pinned, this is a reconnect to a
+    // paired host, not a new pairing: skip the PIN prompt and run as a normal
+    // session. This is no weaker than the pinned path: the verifier records the
+    // exact fingerprint presented, and it must match the trusted store byte-for-byte.
+    let is_pairing = is_pairing && {
+        let peer_fp = pending_state.lock().unwrap().peer_fingerprint;
+        !peer_fp.is_some_and(|fp| trusted_set.lock().unwrap().contains(&fp))
+    };
+    if !is_pairing {
+        info!("peer certificate is already trusted; continuing as a paired session");
+    }
+
     // If pairing, check cert and calculate PIN.
     if is_pairing {
         let peer_fp = {
