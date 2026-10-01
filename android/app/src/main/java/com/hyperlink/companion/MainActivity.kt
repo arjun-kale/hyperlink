@@ -9,6 +9,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
@@ -27,6 +28,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     companion object {
         private const val TAG = "MainActivity"
         private const val REQUEST_MEDIA_PROJECTION = 1001
+        private const val REQUEST_POST_NOTIFICATIONS = 1002
     }
 
     private lateinit var statusText: TextView
@@ -45,6 +47,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     private lateinit var discoveryManager: DiscoveryManager
     private val discoveredHosts = mutableMapOf<String, Pair<String, Int>>()
     private var isScanning = false
+    private var connectingHostName: String = "host"
 
     // Phase 8/9/10 background services — real `Service()` subclasses (unlike
     // ClipboardService/FileAccessService/NetworkMonitorService above, which are
@@ -100,6 +103,10 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
         bindService(Intent(this, ProximityRangingService::class.java), proximityConnection, Context.BIND_AUTO_CREATE)
         bindService(Intent(this, HandoffService::class.java), handoffConnection, Context.BIND_AUTO_CREATE)
         bindService(Intent(this, AmbientContextProvider::class.java), ambientConnection, Context.BIND_AUTO_CREATE)
+
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
+        }
 
         // Programmatically Build Premium Dark Theme UI
         val mainLayout = LinearLayout(this).apply {
@@ -318,6 +325,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
         unbindService(proximityConnection)
         unbindService(handoffConnection)
         unbindService(ambientConnection)
+        ConnectionKeepAliveService.stop(this)
     }
 
     @Suppress("DEPRECATION")
@@ -499,6 +507,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
                 gravity = Gravity.CENTER_VERTICAL
                 setOnClickListener {
                     log("Tapped host: $name. Initiating connection...")
+                    connectingHostName = name
                     // If not paired, connect in pairing mode first
                     QuicClient.connect(ip, port, isPairing = true)
                 }
@@ -551,6 +560,8 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
             toggleControlCard(true)
         }
 
+        ConnectionKeepAliveService.start(this, connectingHostName)
+
         val fingerprint = try {
             QuicClient.ownFingerprint()
         } catch (e: Exception) {
@@ -573,6 +584,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
             toggleControlCard(false)
         }
         proximityService?.stopRanging()
+        ConnectionKeepAliveService.stop(this)
     }
 
     override fun onMessage(streamType: Byte, payload: ByteArray) {
