@@ -120,6 +120,31 @@ impl DeviceConfig {
             .insert(peer_name.to_string(), fingerprint.to_string());
     }
 
+    /// Add a peer under `peer_name` without ever displacing a different peer's
+    /// trust. Peer names come from mDNS and aren't unique (every host defaults to
+    /// `Linux-Host`), so if the name already belongs to a different fingerprint, a
+    /// short fingerprint suffix is appended instead of overwriting it. Re-pairing a
+    /// fingerprint that's already trusted is a no-op. Returns the key used.
+    pub fn add_trusted_peer_unique(&mut self, peer_name: &str, fingerprint: &str) -> String {
+        if let Some((key, _)) = self
+            .trusted_peers
+            .iter()
+            .find(|(_, fp)| fp.as_str() == fingerprint)
+        {
+            return key.clone();
+        }
+        let key = match self.trusted_peers.get(peer_name) {
+            None => peer_name.to_string(),
+            Some(_) => {
+                // First 4 bytes, e.g. "AB:CD:EF:01" — fingerprints are colon-separated hex.
+                let short: String = fingerprint.chars().take(11).collect();
+                format!("{peer_name} ({short})")
+            }
+        };
+        self.add_trusted_peer(&key, fingerprint);
+        key
+    }
+
     /// Remove a peer from the trusted list.
     pub fn remove_trusted_peer(&mut self, peer_name: &str) {
         self.trusted_peers.remove(peer_name);
@@ -163,6 +188,32 @@ mod tests {
         assert_eq!(reloaded.device_name, "test-device");
         assert_eq!(reloaded.trusted_peers.get("peer-1").unwrap(), "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF");
         assert_eq!(reloaded.preferences, HostPreferences::default());
+    }
+
+    #[test]
+    fn add_trusted_peer_unique_never_overwrites_another_peer() {
+        let dir = tempdir().unwrap();
+        let mut config =
+            DeviceConfig::load_or_create(&dir.path().join("config.json"), "phone").unwrap();
+        let fp_a = "AA:AA:AA:AA:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00";
+        let fp_b = "BB:BB:BB:BB:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00";
+
+        assert_eq!(
+            config.add_trusted_peer_unique("Linux-Host", fp_a),
+            "Linux-Host"
+        );
+        // Two hosts both left on the default mDNS name: the second must not evict the first.
+        assert_eq!(
+            config.add_trusted_peer_unique("Linux-Host", fp_b),
+            "Linux-Host (BB:BB:BB:BB)"
+        );
+        // Re-pairing an already-trusted host doesn't add a duplicate entry.
+        assert_eq!(config.add_trusted_peer_unique("Desk", fp_a), "Linux-Host");
+
+        assert_eq!(config.trusted_peers.len(), 2);
+        let trusted = config.get_trusted_fingerprints_set();
+        assert!(trusted.contains(&crate::crypto::string_to_fingerprint(fp_a).unwrap()));
+        assert!(trusted.contains(&crate::crypto::string_to_fingerprint(fp_b).unwrap()));
     }
 
     /// A config.json written before `HostPreferences` existed (Phase 0-10) must still

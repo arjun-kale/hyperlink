@@ -198,13 +198,17 @@ async fn handle_incoming_connection(
                 return Err(anyhow::anyhow!("pairing rejected by user"));
             }
 
-            // Save the trusted client fingerprint.
+            // Save the trusted client fingerprint. Every companion currently presents
+            // the same name, so a second phone gets a fingerprint-suffixed entry
+            // rather than evicting the first phone's trust.
             let fp_str = crypto::fingerprint_to_string(&fp);
-            info!("pairing accepted, saving client fingerprint: {}", fp_str);
-
             {
                 let mut config = config_arc.lock().unwrap();
-                config.add_trusted_peer("Android-Companion", &fp_str);
+                let key = config.add_trusted_peer_unique("Android-Companion", &fp_str);
+                info!(
+                    "pairing accepted, trusting {:?} with fingerprint: {}",
+                    key, fp_str
+                );
                 config.save(&config_path)?;
             }
         } else {

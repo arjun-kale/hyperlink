@@ -309,9 +309,11 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_connectHos
 /// Confirm pairing and persist host fingerprint.
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_confirmPairing(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
+    host_name: JString,
 ) -> jboolean {
+    let host_name: String = env.get_string(&host_name).unwrap().into();
     let mut state = CLIENT_STATE.lock().unwrap();
 
     if let (Some(fp), Some(mut config), Some(path)) = (
@@ -320,12 +322,11 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_confirmPai
         state.config_path.as_ref(),
     ) {
         let fp_str = crypto::fingerprint_to_string(&fp);
+        let key = config.add_trusted_peer_unique(&host_name, &fp_str);
         info!(
-            "pairing confirmed: adding trusted host fingerprint: {}",
-            fp_str
+            "pairing confirmed: trusting host {:?} with fingerprint: {}",
+            key, fp_str
         );
-
-        config.add_trusted_peer("Linux-Host", &fp_str);
         if let Err(e) = config.save(path) {
             error!("failed to save updated config: {}", e);
             return 0; // false

@@ -26,7 +26,7 @@ object QuicClient {
     // --- Native JNI Interface declarations ---
     private external fun initialize(storagePath: String)
     private external fun connectHost(hostIp: String, port: Int, isPairing: Boolean)
-    private external fun confirmPairing(): Boolean
+    private external fun confirmPairing(hostName: String): Boolean
     private external fun sendMessage(payload: ByteArray): Boolean
     private external fun pollEvent(): String?
     private external fun sendVideoFrame(frameData: ByteArray, frameId: Int, timestampUs: Long, isKeyframe: Boolean, width: Int, height: Int): Boolean
@@ -90,11 +90,11 @@ object QuicClient {
     }
 
     /**
-     * Confirms a pending pairing request.
+     * Confirms a pending pairing request, trusting the host under its mDNS name.
      */
-    fun confirm(): Boolean {
-        Log.i(TAG, "confirming pairing")
-        return confirmPairing()
+    fun confirm(hostName: String): Boolean {
+        Log.i(TAG, "confirming pairing with $hostName")
+        return confirmPairing(hostName)
     }
 
     /**

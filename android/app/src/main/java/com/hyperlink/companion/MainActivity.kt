@@ -448,7 +448,7 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     }
 
     private fun confirmPairingFlow() {
-        if (QuicClient.confirm()) {
+        if (QuicClient.confirm(connectingHostName)) {
             Toast.makeText(this, "Pairing approved!", Toast.LENGTH_SHORT).show()
             log("Pairing confirmed and identity fingerprint persisted.")
             togglePairingCard(false)
