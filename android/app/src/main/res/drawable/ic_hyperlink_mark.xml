@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HyperLink mark (white). Generated from the same geometry as docs/brand/hyperlink-logo.svg. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M36.664,50.251 L50.251,36.664 A8.453,8.453 0 0 1 62.204,36.664 L71.336,45.796 A8.453,8.453 0 0 1 71.336,57.749 L57.749,71.336 A8.453,8.453 0 0 1 45.796,71.336 L36.664,62.204 A8.453,8.453 0 0 1 36.664,50.251 Z M40.933,54.52 A2.415,2.415 0 0 0 40.933,57.935 L50.065,67.067 A2.415,2.415 0 0 0 53.48,67.067 L67.067,53.48 A2.415,2.415 0 0 0 67.067,50.065 L57.935,40.933 A2.415,2.415 0 0 0 54.52,40.933 L40.933,54.52 Z"/>
+    <path android:fillColor="#FFFFFF" android:pathData="M31.132,73.156 L49.322,54.965 A0.945,0.945 0 0 1 50.659,54.965 L53.035,57.341 A0.945,0.945 0 0 1 53.035,58.678 L34.844,76.868 A0.945,0.945 0 0 1 33.508,76.868 L31.132,74.492 A0.945,0.945 0 0 1 31.132,73.156 Z"/>
+    <path android:fillColor="#FFFFFF" android:pathData="M55.188,49.1 L73.156,31.132 A0.945,0.945 0 0 1 74.492,31.132 L76.868,33.508 A0.945,0.945 0 0 1 76.868,34.844 L58.9,52.812 A0.945,0.945 0 0 1 57.564,52.812 L55.188,50.436 A0.945,0.945 0 0 1 55.188,49.1 Z"/>
+</vector>
