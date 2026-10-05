@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand blue, from the HyperLink logo (docs/brand/hyperlink-logo.svg). -->
+    <color name="hyperlink_brand">#2366FF</color>
+    <!-- Window background shown before Compose draws: matches the app backdrop. -->
+    <color name="hyperlink_window">#F4F6FB</color>
+</resources>

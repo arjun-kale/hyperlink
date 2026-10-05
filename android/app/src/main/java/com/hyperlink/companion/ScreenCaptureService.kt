@@ -9,6 +9,7 @@ import android.content.Intent
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.MediaCodec
+import android.os.Bundle
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.projection.MediaProjection
@@ -32,8 +33,13 @@ class ScreenCaptureService : Service() {
         private const val EXTRA_DATA = "data"
 
         private const val MAX_WIDTH = 1080
-        private const val BITRATE = 4_000_000 // 4 Mbps
-        private const val FRAME_RATE = 30
+        // Upper bound for variable bitrate: plenty for sharp text on a LAN, and a
+        // static screen costs almost nothing.
+        private const val BITRATE = 8_000_000 // 8 Mbps
+        private const val FRAME_RATE = 60
+        /** When the screen is static, re-send the last frame after this long, so a
+         *  dropped frame doesn't leave a stale image on the computer. */
+        private const val REPEAT_FRAME_AFTER_US = 100_000L
         private const val I_FRAME_INTERVAL = 1 // seconds
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
 
@@ -47,6 +53,19 @@ class ScreenCaptureService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, ScreenCaptureService::class.java))
+        }
+
+        @Volatile
+        private var instance: ScreenCaptureService? = null
+
+        /** Asks the encoder for a keyframe now (the computer lost a frame). */
+        fun requestKeyframe() {
+            val codec = instance?.encoder ?: return
+            try {
+                codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+            } catch (e: IllegalStateException) {
+                // Encoder is stopping; nothing to recover.
+            }
         }
     }
 
@@ -65,6 +84,7 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         createNotificationChannel()
     }
 
@@ -74,19 +94,24 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1)
-        @Suppress("DEPRECATION")
-        val data: Intent? = intent.getParcelableExtra(EXTRA_DATA)
+        // Android requires startForeground() promptly after startForegroundService(),
+        // even if we're about to bail out — otherwise it kills the whole app.
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification(),
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+        )
 
-        if (resultCode == -1 || data == null) {
-            Log.e(TAG, "Invalid start parameters")
+        // Note RESULT_OK is -1, so the "missing" default must be something else.
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE)
+        val data: Intent? = intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+
+        if (resultCode != android.app.Activity.RESULT_OK || data == null) {
+            Log.e(TAG, "Invalid start parameters (resultCode=$resultCode, data=${data != null})")
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
-
-        // Start foreground immediately to avoid ANR
-        val notification = buildNotification()
-        startForeground(NOTIFICATION_ID, notification)
 
         // Compute capture dimensions
         computeCaptureDimensions()
@@ -110,6 +135,7 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
+        instance = null
         stopCapture()
         super.onDestroy()
     }
@@ -147,9 +173,18 @@ class ScreenCaptureService : Service() {
                 setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                // Baseline: no B-frames, so every frame can be shown as soon as it's decoded.
+                // No KEY_LEVEL: the encoder picks one valid for this resolution (the old
+                // Level 3.1 only covers up to 720p).
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                // Low latency: emit each frame immediately, and run as a realtime codec.
+                setInteger(MediaFormat.KEY_LATENCY, 1)
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_FRAME_AFTER_US)
+                // SPS/PPS on every keyframe, so the computer's decoder can (re)start
+                // from any keyframe, not only the first one.
+                setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
             }
 
             encoder = MediaCodec.createEncoderByType(MIME_TYPE).also { codec ->
@@ -173,6 +208,7 @@ class ScreenCaptureService : Service() {
                 // Start encoder output thread
                 isEncoding.set(true)
                 frameCounter.set(0)
+                configSent = false
                 encoderThread = Thread({ drainEncoder(codec) }, "HyperLink-Encoder").also {
                     it.start()
                 }
@@ -201,8 +237,11 @@ class ScreenCaptureService : Service() {
                     val outputBuffer = codec.getOutputBuffer(outputIndex) ?: continue
 
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                        // Config data (SPS/PPS) — can also arrive as a regular buffer
-                        Log.d(TAG, "Received codec config buffer, size=${bufferInfo.size}")
+                        // Config data (SPS/PPS) can arrive as a buffer instead of in the format.
+                        val config = ByteArray(bufferInfo.size)
+                        outputBuffer.position(bufferInfo.offset)
+                        outputBuffer.get(config)
+                        if (!configSent) sendConfigFrom(config)
                         codec.releaseOutputBuffer(outputIndex, false)
                         continue
                     }
@@ -215,6 +254,8 @@ class ScreenCaptureService : Service() {
                         outputBuffer.get(frameData)
 
                         val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                        // Last resort: keyframes carry SPS/PPS inline (KEY_PREPEND_HEADER_TO_SYNC_FRAMES).
+                        if (isKeyframe && !configSent) sendConfigFrom(frameData)
                         val frameId = frameCounter.getAndIncrement()
                         val timestampUs = bufferInfo.presentationTimeUs
 
@@ -239,21 +280,53 @@ class ScreenCaptureService : Service() {
         Log.i(TAG, "Encoder drain loop exited")
     }
 
+    /** Whether the computer has this stream's SPS/PPS yet (it can't decode without them). */
+    @Volatile
+    private var configSent = false
+
     private fun handleFormatChanged(format: MediaFormat) {
-        val spsBuffer: ByteBuffer? = format.getByteBuffer("csd-0")
-        val ppsBuffer: ByteBuffer? = format.getByteBuffer("csd-1")
+        val csd = listOfNotNull(format.getByteBuffer("csd-0"), format.getByteBuffer("csd-1"))
+            .map { buf -> ByteArray(buf.remaining()).also { buf.get(it) } }
+        if (csd.isEmpty() || !sendConfigFrom(csd.reduce { a, b -> a + b })) {
+            // Some encoders (with KEY_PREPEND_HEADER_TO_SYNC_FRAMES) leave the format
+            // without SPS/PPS; they're taken from a codec-config buffer or the first
+            // keyframe instead (see drainEncoder).
+            Log.i(TAG, "Encoder format has no SPS/PPS; will take them from the stream")
+        }
+    }
 
-        if (spsBuffer != null && ppsBuffer != null) {
-            val sps = ByteArray(spsBuffer.remaining())
-            spsBuffer.get(sps)
+    /**
+     * Finds the SPS and PPS in Annex-B data and sends them as the stream config,
+     * without start codes (the computer adds its own). Returns true if sent.
+     */
+    private fun sendConfigFrom(annexB: ByteArray): Boolean {
+        val nals = nalUnits(annexB)
+        val sps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 } ?: return false
+        val pps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 } ?: return false
+        Log.i(TAG, "Sending video config: SPS=${sps.size} bytes, PPS=${pps.size} bytes")
+        QuicClient.sendConfig(sps, pps, BITRATE, FRAME_RATE)
+        configSent = true
+        return true
+    }
 
-            val pps = ByteArray(ppsBuffer.remaining())
-            ppsBuffer.get(pps)
-
-            Log.i(TAG, "Sending video config: SPS=${sps.size} bytes, PPS=${pps.size} bytes")
-            QuicClient.sendConfig(sps, pps, BITRATE, FRAME_RATE)
-        } else {
-            Log.w(TAG, "FORMAT_CHANGED but missing SPS/PPS in format")
+    /** Splits Annex-B byte-stream data into NAL units, without start codes. */
+    private fun nalUnits(data: ByteArray): List<ByteArray> {
+        val starts = mutableListOf<Pair<Int, Int>>() // (start-code offset, payload offset)
+        var i = 0
+        while (i + 3 <= data.size) {
+            if (data[i].toInt() == 0 && data[i + 1].toInt() == 0) {
+                if (data[i + 2].toInt() == 1) {
+                    starts += i to i + 3; i += 3; continue
+                }
+                if (i + 4 <= data.size && data[i + 2].toInt() == 0 && data[i + 3].toInt() == 1) {
+                    starts += i to i + 4; i += 4; continue
+                }
+            }
+            i++
+        }
+        return starts.mapIndexed { n, (_, payload) ->
+            val end = if (n + 1 < starts.size) starts[n + 1].first else data.size
+            data.copyOfRange(payload, end)
         }
     }
 
@@ -311,8 +384,8 @@ class ScreenCaptureService : Service() {
 
     private fun buildNotification(): Notification {
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("HyperLink Screen Mirroring")
-            .setContentText("Your screen is being mirrored to the host.")
+            .setContentTitle("Sharing your screen")
+            .setContentText("Your computer can see this screen. Stop it from the HyperLink app.")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()

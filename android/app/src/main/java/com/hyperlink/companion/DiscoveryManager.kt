@@ -14,9 +14,23 @@ class DiscoveryManager(private val context: Context, private val listener: Disco
     private var isScanning = false
 
     interface DiscoveryListener {
-        fun onHostDiscovered(name: String, ip: String, port: Int)
+        /** `id` is the mDNS service name (stable per computer); `name` is what to show. */
+        fun onHostDiscovered(id: String, name: String, ip: String, port: Int)
+        fun onHostLost(id: String)
         fun onDiscoveryStarted()
         fun onDiscoveryStopped()
+    }
+
+    /**
+     * The computer's own name, as the user set it: the `device_name` TXT
+     * attribute, falling back to the service name minus the "-host" suffix the
+     * host appends (older hosts advertise without the attribute).
+     */
+    private fun displayName(info: NsdServiceInfo): String {
+        val fromTxt = info.attributes["device_name"]?.let { String(it, Charsets.UTF_8) }?.trim()
+        if (!fromTxt.isNullOrEmpty()) return fromTxt
+        val service = info.serviceName ?: return "Computer"
+        return service.removeSuffix("-host")
     }
 
     @Synchronized
@@ -54,11 +68,13 @@ class DiscoveryManager(private val context: Context, private val listener: Disco
                         nsdManager.registerServiceInfoCallback(serviceInfo, context.mainExecutor, object : NsdManager.ServiceInfoCallback {
                             override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {}
                             override fun onServiceUpdated(resolvedServiceInfo: NsdServiceInfo) {
-                                val host = resolvedServiceInfo.host
-                                val ip = host?.hostAddress ?: ""
-                                val port = resolvedServiceInfo.port
-                                val name = resolvedServiceInfo.serviceName ?: "Unknown Host"
-                                listener.onHostDiscovered(name, ip, port)
+                                val ip = resolvedServiceInfo.host?.hostAddress ?: return
+                                listener.onHostDiscovered(
+                                    resolvedServiceInfo.serviceName ?: ip,
+                                    displayName(resolvedServiceInfo),
+                                    ip,
+                                    resolvedServiceInfo.port,
+                                )
                             }
                             override fun onServiceLost() {}
                             override fun onServiceInfoCallbackUnregistered() {}
@@ -72,11 +88,13 @@ class DiscoveryManager(private val context: Context, private val listener: Disco
                             override fun onServiceResolved(resolvedServiceInfo: NsdServiceInfo?) {
                                 Log.d(TAG, "Service resolved: $resolvedServiceInfo")
                                 if (resolvedServiceInfo == null) return
-                                val host = resolvedServiceInfo.host
-                                val ip = host?.hostAddress ?: ""
-                                val port = resolvedServiceInfo.port
-                                val name = resolvedServiceInfo.serviceName ?: "Unknown Host"
-                                listener.onHostDiscovered(name, ip, port)
+                                val ip = resolvedServiceInfo.host?.hostAddress ?: return
+                                listener.onHostDiscovered(
+                                    resolvedServiceInfo.serviceName ?: ip,
+                                    displayName(resolvedServiceInfo),
+                                    ip,
+                                    resolvedServiceInfo.port,
+                                )
                             }
                         })
                     }
@@ -85,6 +103,7 @@ class DiscoveryManager(private val context: Context, private val listener: Disco
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo?) {
                 Log.d(TAG, "Service lost: $serviceInfo")
+                serviceInfo?.serviceName?.let(listener::onHostLost)
             }
         }
 

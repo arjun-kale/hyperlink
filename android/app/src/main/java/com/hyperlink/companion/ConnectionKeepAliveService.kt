@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.IBinder
 
 /**
@@ -38,11 +39,29 @@ class ConnectionKeepAliveService : Service() {
         }
     }
 
+    /**
+     * Keeps Wi-Fi out of power-save while linked. In power-save the radio batches
+     * packets, which adds delay and bursty loss — fatal for screen mirroring and
+     * remote input.
+     */
+    private var wifiLock: WifiManager.WifiLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        val wifi = applicationContext.getSystemService(WifiManager::class.java)
+        wifiLock = wifi?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "HyperLink:link")?.apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    override fun onDestroy() {
+        wifiLock?.takeIf { it.isHeld }?.release()
+        wifiLock = null
+        super.onDestroy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

@@ -27,6 +27,7 @@ object QuicClient {
     private external fun initialize(storagePath: String)
     private external fun connectHost(hostIp: String, port: Int, isPairing: Boolean)
     private external fun confirmPairing(hostName: String): Boolean
+    private external fun disconnectHost()
     private external fun sendMessage(payload: ByteArray): Boolean
     private external fun pollEvent(): String?
     private external fun sendVideoFrame(frameData: ByteArray, frameId: Int, timestampUs: Long, isKeyframe: Boolean, width: Int, height: Int): Boolean
@@ -48,10 +49,14 @@ object QuicClient {
     // --- Kotlin Wrapper Logic ---
     interface EventListener {
         fun onPairingPin(pin: Int)
+        /** Both sides confirmed pairing; trust is saved. `onConnected` follows. */
+        fun onPaired() {}
         fun onConnected()
         fun onDisconnected(reason: String)
         fun onMessage(streamType: Byte, payload: ByteArray)
         fun onVideoStreamReady()
+        /** The computer lost a frame; send a keyframe so it can recover. */
+        fun onKeyframeRequest() {}
         fun onPointerEvent(action: Int, button: Int, xNorm: Int, yNorm: Int, pressure: Int) {}
         fun onKeyEvent(action: Int, keycode: Int, modifiers: Int) {}
         fun onScrollEvent(dx: Int, dy: Int, xNorm: Int, yNorm: Int) {}
@@ -89,8 +94,15 @@ object QuicClient {
         connectHost(hostIp, port, isPairing)
     }
 
+    /** Closes the current connection; reported back as a disconnect. */
+    fun disconnect() {
+        Log.i(TAG, "disconnecting")
+        disconnectHost()
+    }
+
     /**
-     * Confirms a pending pairing request, trusting the host under its mDNS name.
+     * Records that the user confirmed the pairing code. Trust is saved (and
+     * `onPaired` fires) once the host has accepted too.
      */
     fun confirm(hostName: String): Boolean {
         Log.i(TAG, "confirming pairing with $hostName")
@@ -150,6 +162,12 @@ object QuicClient {
                             "pairing_pin" -> {
                                 val pin = json.optInt("pin")
                                 listener?.onPairingPin(pin)
+                            }
+                            "paired" -> {
+                                listener?.onPaired()
+                            }
+                            "keyframe_request" -> {
+                                listener?.onKeyframeRequest()
                             }
                             "connected" -> {
                                 listener?.onConnected()

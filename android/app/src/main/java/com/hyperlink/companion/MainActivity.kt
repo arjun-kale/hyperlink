@@ -1,56 +1,54 @@
 package com.hyperlink.companion
 
-import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
-import android.util.TypedValue
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
-import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hyperlink.companion.ui.Computer
+import com.hyperlink.companion.ui.HyperLinkApp
+import com.hyperlink.companion.ui.HyperLinkTheme
+import com.hyperlink.companion.ui.LinkPhase
+import com.hyperlink.companion.ui.LinkStore
+import com.hyperlink.companion.ui.PermissionKind
+import com.hyperlink.companion.ui.UiActions
+import com.hyperlink.companion.ui.permissionIntent
+import com.hyperlink.companion.ui.readPermissions
 
-class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.EventListener {
+class MainActivity : ComponentActivity(), DiscoveryManager.DiscoveryListener, QuicClient.EventListener, UiActions {
     companion object {
         private const val TAG = "MainActivity"
-        private const val REQUEST_MEDIA_PROJECTION = 1001
         private const val REQUEST_POST_NOTIFICATIONS = 1002
+        /** Give up on a connection attempt that hasn't resolved by then. */
+        private const val CONNECT_TIMEOUT_MS = 15_000L
+        /** After losing a connection, look again for the computer after this. */
+        private const val RECONNECT_DELAY_MS = 2_500L
     }
 
-    private lateinit var statusText: TextView
-    private lateinit var scanButton: Button
-    private lateinit var hostsContainer: LinearLayout
-    private lateinit var pairingContainer: LinearLayout
-    private lateinit var pairingPinText: TextView
-    private lateinit var confirmButton: Button
-    private lateinit var controlContainer: LinearLayout
-    private lateinit var messageInput: EditText
-    private lateinit var sendButton: Button
-    private lateinit var startMirrorButton: Button
-    private lateinit var stopMirrorButton: Button
-    private lateinit var logsText: TextView
-
+    private lateinit var store: LinkStore
     private lateinit var discoveryManager: DiscoveryManager
-    private val discoveredHosts = mutableMapOf<String, Pair<String, Int>>()
-    private var isScanning = false
-    private var connectingHostName: String = "host"
+    private val main = Handler(Looper.getMainLooper())
+
+    /** The computer the current (or last) connection attempt is for. */
+    private var target: Computer? = null
+    /** Set when the user disconnects, so we don't immediately reconnect. */
+    private var userDisconnected = false
+    private var attemptId = 0
 
     // Phase 8/9/10 background services — real `Service()` subclasses (unlike
-    // ClipboardService/FileAccessService/NetworkMonitorService above, which are
+    // ClipboardService/FileAccessService/NetworkMonitorService, which are
     // plain classes instantiated directly), so they're bound rather than `init()`'d.
     private var proximityService: ProximityRangingService? = null
     private var handoffService: HandoffService? = null
@@ -86,9 +84,22 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
         }
     }
 
+    private val screenCapture = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        if (result.resultCode == RESULT_OK && data != null) {
+            log("Screen capture allowed; starting")
+            ScreenCaptureService.start(this, result.resultCode, data)
+            store.update { it.copy(mirroring = true) }
+        } else {
+            log("Screen capture not allowed")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+        enableEdgeToEdge()
+        store = LinkStore(this)
+
         // Initialize Core Clients
         discoveryManager = DiscoveryManager(this, this)
         QuicClient.init(this, this)
@@ -104,221 +115,35 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
         bindService(Intent(this, HandoffService::class.java), handoffConnection, Context.BIND_AUTO_CREATE)
         bindService(Intent(this, AmbientContextProvider::class.java), ambientConnection, Context.BIND_AUTO_CREATE)
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
-        }
-
-        // Programmatically Build Premium Dark Theme UI
-        val mainLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#121212")) // Dark Mode background
-            setPadding(dp(16), dp(24), dp(16), dp(24))
-        }
-
-        // Header Title
-        val titleView = TextView(this).apply {
-            text = "HyperLink Companion"
-            textColor(Color.parseColor("#00E5FF")) // Teal Accent
-            textSize = 24f
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
-        mainLayout.addView(titleView)
-
-        // Status Panel Card
-        val statusCard = createCardLayout().apply {
-            addView(TextView(this@MainActivity).apply {
-                text = "Connection Status"
-                textColor(Color.parseColor("#B0BEC5"))
-                textSize = 12f
-            })
-            statusText = TextView(this@MainActivity).apply {
-                text = "Disconnected"
-                textColor(Color.WHITE)
-                textSize = 18f
-                typeface = Typeface.DEFAULT_BOLD
+        setContent {
+            val state by store.state.collectAsStateWithLifecycle()
+            HyperLinkTheme {
+                HyperLinkApp(state, this)
             }
-            addView(statusText)
         }
-        mainLayout.addView(statusCard, margin(0, 16, 0, 0))
+    }
 
-        // Scanner Section
-        val scanSection = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+    override fun onStart() {
+        super.onStart()
+        if (store.state.value.phase !is LinkPhase.Connected) {
+            discoveryManager.startDiscovery()
         }
-        scanSection.addView(TextView(this).apply {
-            text = "Discovered Host Daemons"
-            textColor(Color.WHITE)
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
-        scanButton = createAccentButton("Scan").apply {
-            setOnClickListener { toggleScan() }
-        }
-        scanSection.addView(scanButton)
-        mainLayout.addView(scanSection, margin(0, 24, 0, 0))
+    }
 
-        // Scrollable Hosts List
-        val scrollView = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(120)
-            )
-        }
-        hostsContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        scrollView.addView(hostsContainer)
-        mainLayout.addView(scrollView, margin(0, 8, 0, 0))
+    override fun onResume() {
+        super.onResume()
+        // Permissions are granted in system Settings; re-read them on every return.
+        store.update { it.copy(permissions = readPermissions(this)) }
+    }
 
-        // Pairing Action Card (Hidden by default)
-        pairingContainer = createCardLayout().apply {
-            visibility = View.GONE
-            addView(TextView(this@MainActivity).apply {
-                text = "Mutual Pairing Required"
-                textColor(Color.parseColor("#FF5252")) // Red accent
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-            })
-            pairingPinText = TextView(this@MainActivity).apply {
-                text = "000000"
-                textColor(Color.WHITE)
-                textSize = 48f
-                gravity = Gravity.CENTER
-                typeface = Typeface.create("monospace", Typeface.BOLD)
-                setPadding(0, dp(12), 0, dp(12))
-            }
-            addView(pairingPinText)
-            addView(TextView(this@MainActivity).apply {
-                text = "Confirm this matches host terminal before pairing."
-                textColor(Color.parseColor("#B0BEC5"))
-                textSize = 12f
-                gravity = Gravity.CENTER
-            })
-            confirmButton = createAccentButton("Confirm & Save Pairing").apply {
-                setOnClickListener { confirmPairingFlow() }
-            }
-            addView(confirmButton, margin(0, 12, 0, 0))
-        }
-        mainLayout.addView(pairingContainer, margin(0, 16, 0, 0))
-
-        // Session Controller Card (Hidden by default)
-        controlContainer = createCardLayout().apply {
-            visibility = View.GONE
-            addView(TextView(this@MainActivity).apply {
-                text = "Secure Control Channel"
-                textColor(Color.parseColor("#00E5FF"))
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-            })
-            messageInput = EditText(this@MainActivity).apply {
-                hint = "Enter text message to send..."
-                setHintTextColor(Color.parseColor("#78909C"))
-                setTextColor(Color.WHITE)
-                textSize = 14f
-                setPadding(dp(8), dp(12), dp(8), dp(12))
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#2C2C2C"))
-                    cornerRadius = dp(6).toFloat()
-                }
-            }
-            addView(messageInput, margin(0, 12, 0, 0))
-            sendButton = createAccentButton("Send Message").apply {
-                setOnClickListener { sendMessageFlow() }
-            }
-            addView(sendButton, margin(0, 12, 0, 0))
-
-            // -- Mirroring Controls --
-            addView(TextView(this@MainActivity).apply {
-                text = "Screen Mirroring"
-                textColor(Color.parseColor("#00E5FF"))
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-            }, margin(0, 16, 0, 0))
-
-            startMirrorButton = createAccentButton("Start Mirroring").apply {
-                setOnClickListener { requestScreenCapture() }
-            }
-            addView(startMirrorButton, margin(0, 8, 0, 0))
-
-            stopMirrorButton = createAccentButton("Stop Mirroring").apply {
-                setOnClickListener { stopMirroring() }
-                visibility = View.GONE
-            }
-            addView(stopMirrorButton, margin(0, 8, 0, 0))
-
-            val notifPermButton = createSecondaryButton("Notification & DND Permissions").apply {
-                setOnClickListener {
-                    val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-                    if (!nm.isNotificationPolicyAccessGranted) {
-                        startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
-                    } else {
-                        startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                    }
-                }
-            }
-            addView(notifPermButton, margin(0, 8, 0, 0))
-
-            val filePermButton = createSecondaryButton("Storage & File Permissions").apply {
-                setOnClickListener {
-                    FileAccessService.requestStoragePermission(this@MainActivity)
-                }
-            }
-            addView(filePermButton, margin(0, 8, 0, 0))
-
-            val multipathButton = createSecondaryButton("Network Multipath Status").apply {
-                setOnClickListener {
-                    val activePath = try {
-                        NetworkMonitorService.getActivePath()
-                    } catch (e: Exception) {
-                        0
-                    }
-                    val pathName = when (activePath) {
-                        0 -> "Wi-Fi Primary (5GHz/6GHz)"
-                        1 -> "Cellular Tether"
-                        2 -> "Ethernet"
-                        3 -> "Wi-Fi MLO Secondary"
-                        else -> "Unknown"
-                    }
-                    log("Active Network Path: $pathName (id=$activePath)")
-                }
-            }
-            addView(multipathButton, margin(0, 8, 0, 0))
-        }
-        mainLayout.addView(controlContainer, margin(0, 16, 0, 0))
-
-        // Logs/Terminal Output
-        val logsHeader = TextView(this).apply {
-            text = "Activity Log"
-            textColor(Color.parseColor("#B0BEC5"))
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        mainLayout.addView(logsHeader, margin(0, 16, 0, 0))
-
-        val logsScrollView = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
-        }
-        logsText = TextView(this).apply {
-            text = "Ready.\n"
-            textColor(Color.parseColor("#4CAF50")) // Green terminal text
-            textSize = 12f
-            typeface = Typeface.MONOSPACE
-        }
-        logsScrollView.addView(logsText)
-        mainLayout.addView(logsScrollView, margin(0, 8, 0, 0))
-
-        setContentView(mainLayout)
+    override fun onStop() {
+        super.onStop()
+        discoveryManager.stopDiscovery()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        main.removeCallbacksAndMessages(null)
         ClipboardService.instance?.stop()
         discoveryManager.stopDiscovery()
         proximityService?.stopRanging()
@@ -328,240 +153,162 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
         ConnectionKeepAliveService.stop(this)
     }
 
-    @Suppress("DEPRECATION")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_MEDIA_PROJECTION) {
-            if (resultCode == RESULT_OK && data != null) {
-                log("MediaProjection permission granted. Starting capture...")
-                ScreenCaptureService.start(this, resultCode, data)
-                runOnUiThread {
-                    startMirrorButton.visibility = View.GONE
-                    stopMirrorButton.visibility = View.VISIBLE
-                }
-            } else {
-                log("MediaProjection permission denied.")
-                Toast.makeText(this, "Screen capture permission denied", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    // --- UI Layout Helpers ---
-
-    private fun dp(valPx: Int): Int {
-        return TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP,
-            valPx.toFloat(),
-            resources.displayMetrics
-        ).toInt()
-    }
-
-    private fun TextView.textColor(color: Int) {
-        setTextColor(color)
-    }
-
-    private fun margin(left: Int, top: Int, right: Int, bottom: Int): LinearLayout.LayoutParams {
-        return LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
-            setMargins(dp(left), dp(top), dp(right), dp(bottom))
-        }
-    }
-
-    private fun createCardLayout(): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#1E1E1E")) // Sleek grey card
-                cornerRadius = dp(12).toFloat()
-            }
-        }
-    }
-
-    private fun createAccentButton(btnText: String): Button {
-        return Button(this).apply {
-            text = btnText
-            setTextColor(Color.BLACK)
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            setPadding(dp(16), dp(4), dp(16), dp(4))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#00E5FF")) // Bright Teal button
-                cornerRadius = dp(8).toFloat()
-            }
-        }
-    }
-
-    private fun createSecondaryButton(btnText: String): Button {
-        return Button(this).apply {
-            text = btnText
-            setTextColor(Color.parseColor("#00E5FF"))
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            setPadding(dp(16), dp(4), dp(16), dp(4))
-            background = GradientDrawable().apply {
-                setColor(Color.TRANSPARENT)
-                setStroke(dp(1), Color.parseColor("#00E5FF"))
-                cornerRadius = dp(8).toFloat()
-            }
-        }
-    }
-
     private fun log(message: String) {
-        runOnUiThread {
-            logsText.append("$message\n")
+        Log.i(TAG, message)
+        if (::store.isInitialized) store.log(message)
+    }
+
+    // ── UiActions ──────────────────────────────────────────────────────────
+
+    override fun finishOnboarding() {
+        store.setOnboarded()
+        // Needed for the "connected" notification that keeps the link alive.
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
         }
     }
 
-    // --- Controller Flows ---
+    override fun connect(computer: Computer) {
+        userDisconnected = false
+        target = computer
+        val attempt = ++attemptId
+        store.update { it.copy(phase = LinkPhase.Connecting(computer.name)) }
+        log("Connecting to ${computer.name} (${computer.ip}:${computer.port})")
+        // Always allow pairing: the bridge only shows a code if this computer's
+        // certificate isn't already trusted, otherwise it connects normally.
+        QuicClient.connect(computer.ip, computer.port, isPairing = true)
 
-    private fun toggleScan() {
-        if (isScanning) {
-            discoveryManager.stopDiscovery()
-            scanButton.text = "Scan"
-            isScanning = false
-            log("Scan stopped.")
+        main.postDelayed({
+            if (attempt == attemptId && store.state.value.phase is LinkPhase.Connecting) {
+                showProblem(
+                    "Couldn't reach ${computer.name}. Check that it's on and on the same Wi-Fi as this phone.",
+                    canRetry = true,
+                )
+                QuicClient.disconnect()
+            }
+        }, CONNECT_TIMEOUT_MS)
+    }
+
+    override fun confirmPairing() {
+        val phase = store.state.value.phase as? LinkPhase.Pairing ?: return
+        if (QuicClient.confirm(phase.computer)) {
+            store.update { it.copy(phase = phase.copy(confirmed = true)) }
+            log("Pairing code confirmed on phone; waiting for the computer")
         } else {
-            discoveredHosts.clear()
-            hostsContainer.removeAllViews()
-            discoveryManager.startDiscovery()
-            scanButton.text = "Stop"
-            isScanning = true
-            log("Scanning local network for HyperLink daemons...")
+            showProblem("Pairing ended before it finished. Try again.", canRetry = true)
         }
     }
 
-    private fun togglePairingCard(show: Boolean) {
-        runOnUiThread {
-            pairingContainer.visibility = if (show) View.VISIBLE else View.GONE
+    override fun cancelPairing() {
+        userDisconnected = true
+        QuicClient.disconnect()
+        store.update { it.copy(phase = LinkPhase.Searching, searchingSinceMs = System.currentTimeMillis()) }
+    }
+
+    override fun retry() {
+        target?.let(::connect) ?: run {
+            store.update { it.copy(phase = LinkPhase.Searching, searchingSinceMs = System.currentTimeMillis()) }
+            restartDiscovery()
         }
     }
 
-    private fun toggleControlCard(show: Boolean) {
-        runOnUiThread {
-            controlContainer.visibility = if (show) View.VISIBLE else View.GONE
-        }
+    override fun disconnect() {
+        userDisconnected = true
+        stopMirroring()
+        QuicClient.disconnect()
     }
 
-    private fun confirmPairingFlow() {
-        if (QuicClient.confirm(connectingHostName)) {
-            Toast.makeText(this, "Pairing approved!", Toast.LENGTH_SHORT).show()
-            log("Pairing confirmed and identity fingerprint persisted.")
-            togglePairingCard(false)
-        } else {
-            Toast.makeText(this, "Failed to confirm pairing", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun requestScreenCapture() {
+    override fun startMirroring() {
         val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        @Suppress("DEPRECATION")
-        startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
-        log("Requesting screen capture permission...")
+        screenCapture.launch(projectionManager.createScreenCaptureIntent())
     }
 
-    private fun stopMirroring() {
-        ScreenCaptureService.stop(this)
-        log("Screen mirroring stopped.")
+    override fun stopMirroring() {
+        if (store.state.value.mirroring) {
+            ScreenCaptureService.stop(this)
+            log("Screen sharing stopped")
+        }
+        store.update { it.copy(mirroring = false) }
+    }
+
+    override fun openPermission(kind: PermissionKind) {
+        try {
+            startActivity(permissionIntent(this, kind))
+        } catch (e: Exception) {
+            // Some OEM builds lack the specific screen; the app's own page always exists.
+            startActivity(
+                Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(android.net.Uri.parse("package:$packageName")),
+            )
+        }
+    }
+
+    override fun forgetComputer(name: String) {
+        store.forgetPaired(name)
+    }
+
+    // ── Discovery ──────────────────────────────────────────────────────────
+
+    override fun onHostDiscovered(id: String, name: String, ip: String, port: Int) {
         runOnUiThread {
-            startMirrorButton.visibility = View.VISIBLE
-            stopMirrorButton.visibility = View.GONE
-        }
-    }
-
-    private fun sendMessageFlow() {
-        val msg = messageInput.text.toString()
-        if (msg.isNotEmpty()) {
-            val bytes = msg.toByteArray()
-            if (QuicClient.send(bytes)) {
-                log("→ sent: $msg")
-                messageInput.setText("")
-            } else {
-                log("send failed (control channel inactive)")
+            val computer = Computer(id, name, ip, port, paired = store.isPaired(name))
+            store.upsertComputer(computer)
+            log("Found $name ($ip:$port)")
+            // A paired computer showing up means we can reconnect on our own.
+            if (computer.paired && !userDisconnected && store.state.value.phase is LinkPhase.Searching) {
+                connect(computer)
             }
         }
     }
 
-    // --- Discovery Callback Listeners ---
-
-    override fun onHostDiscovered(name: String, ip: String, port: Int) {
-        runOnUiThread {
-            val key = "$name@$ip:$port"
-            if (discoveredHosts.containsKey(key)) return@runOnUiThread
-            discoveredHosts[key] = Pair(ip, port)
-
-            log("Discovered: $name ($ip:$port)")
-
-            // Add dynamic list item for host
-            val hostRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(dp(12), dp(12), dp(12), dp(12))
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#262626"))
-                    cornerRadius = dp(8).toFloat()
-                }
-                gravity = Gravity.CENTER_VERTICAL
-                setOnClickListener {
-                    log("Tapped host: $name. Initiating connection...")
-                    connectingHostName = name
-                    // Always allow pairing: the bridge only shows a PIN if the host's
-                    // certificate isn't already pinned, otherwise it connects normally.
-                    QuicClient.connect(ip, port, isPairing = true)
-                }
-            }
-
-            val label = TextView(this).apply {
-                text = "$name\n$ip:$port"
-                textColor(Color.WHITE)
-                textSize = 14f
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            hostRow.addView(label)
-
-            val actionBtn = createAccentButton("Pair").apply {
-                isClickable = false
-                isFocusable = false
-            }
-            hostRow.addView(actionBtn)
-
-            hostsContainer.addView(hostRow, margin(0, 6, 0, 0))
-        }
+    override fun onHostLost(id: String) {
+        runOnUiThread { store.removeComputer(id) }
     }
 
     override fun onDiscoveryStarted() {
-        log("NSD Discovery service active.")
+        log("Looking for computers on this Wi-Fi")
     }
 
     override fun onDiscoveryStopped() {
-        log("NSD Discovery service suspended.")
+        log("Stopped looking for computers")
     }
 
-    // --- JNI QUIC Client Callback Listeners ---
+    private fun restartDiscovery() {
+        discoveryManager.stopDiscovery()
+        store.update { it.copy(computers = emptyList()) }
+        discoveryManager.startDiscovery()
+    }
+
+    // ── Connection events ──────────────────────────────────────────────────
+
+    private fun showProblem(message: String, canRetry: Boolean) {
+        val name = target?.name ?: "your computer"
+        store.update { it.copy(phase = LinkPhase.Problem(name, message, canRetry)) }
+    }
 
     override fun onPairingPin(pin: Int) {
-        log("Received pairing PIN request: $pin")
+        log("Pairing code shown")
         runOnUiThread {
-            pairingPinText.text = String.format("%06d", pin)
-            statusText.text = "Pairing PIN Validation"
-            statusText.textColor(Color.parseColor("#FF9800")) // Orange
-            togglePairingCard(true)
+            val name = target?.name ?: "your computer"
+            store.update { it.copy(phase = LinkPhase.Pairing(name, pin, confirmed = false)) }
         }
+    }
+
+    override fun onPaired() {
+        log("Pairing complete")
     }
 
     override fun onConnected() {
-        log("Connected to secure server!")
+        val name = target?.name ?: "your computer"
+        log("Connected to $name")
         runOnUiThread {
-            statusText.text = "Connected"
-            statusText.textColor(Color.parseColor("#4CAF50")) // Green
-            togglePairingCard(false)
-            toggleControlCard(true)
+            // Connecting at all means the computer is trusted on this phone.
+            store.rememberPaired(name)
+            store.update { it.copy(phase = LinkPhase.Connected(name)) }
+            discoveryManager.stopDiscovery()
         }
 
-        ConnectionKeepAliveService.start(this, connectingHostName)
+        ConnectionKeepAliveService.start(this, name)
 
         val fingerprint = try {
             QuicClient.ownFingerprint()
@@ -577,26 +324,69 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
     }
 
     override fun onDisconnected(reason: String) {
-        log("Disconnected from server: $reason")
-        runOnUiThread {
-            statusText.text = "Disconnected"
-            statusText.textColor(Color.RED)
-            togglePairingCard(false)
-            toggleControlCard(false)
-        }
+        log("Disconnected: $reason")
         proximityService?.stopRanging()
         ConnectionKeepAliveService.stop(this)
+        runOnUiThread { handleDisconnect(reason) }
+    }
+
+    /** Turns a disconnect reason into the next state and plain-language copy. */
+    private fun handleDisconnect(reason: String) {
+        val previous = store.state.value.phase
+        val name = target?.name ?: "your computer"
+        val wasPaired = store.isPaired(name)
+        if (store.state.value.mirroring) {
+            ScreenCaptureService.stop(this)
+            store.update { it.copy(mirroring = false) }
+        }
+        val lower = reason.lowercase()
+        when {
+            reason == "closed_locally" || userDisconnected -> {
+                store.update { it.copy(phase = LinkPhase.Searching, searchingSinceMs = System.currentTimeMillis()) }
+                discoveryManager.startDiscovery()
+            }
+            reason == "pairing_timed_out" ->
+                showProblem("$name didn't get an answer in time. Choose Start Pairing on that computer again, then tap it here.", canRetry = true)
+            reason == "pairing_rejected" ->
+                showProblem("$name didn't accept the pairing. Make sure you pick the matching code, then try again.", canRetry = true)
+            reason == "device_revoked" -> {
+                store.forgetPaired(name)
+                showProblem("This phone was removed on $name. To reconnect, choose Start Pairing on that computer, then tap it here.", canRetry = true)
+            }
+            reason == "pairing_closed" || "handshake" in lower || "certificate" in lower || "aborted" in lower ->
+                if (wasPaired) {
+                    showProblem("$name doesn't recognise this phone anymore. Choose Start Pairing on that computer, then try again.", canRetry = true)
+                } else {
+                    showProblem("$name isn't ready to pair. On that computer, choose Start Pairing, then try again.", canRetry = true)
+                }
+            previous is LinkPhase.Pairing ->
+                showProblem("Pairing didn't finish. Try again.", canRetry = true)
+            previous is LinkPhase.Connected -> {
+                // Lost an established link (Wi-Fi blip, computer asleep): go back
+                // to looking for it; it reconnects as soon as it's seen again.
+                store.update { it.copy(phase = LinkPhase.Searching, searchingSinceMs = System.currentTimeMillis()) }
+                main.postDelayed({ restartDiscovery() }, RECONNECT_DELAY_MS)
+            }
+            "timed out" in lower || reason == "timed_out" ->
+                showProblem("Couldn't reach $name. Check that it's on and on the same Wi-Fi as this phone.", canRetry = true)
+            else ->
+                showProblem("Lost the connection to $name. Try again.", canRetry = true)
+        }
     }
 
     override fun onMessage(streamType: Byte, payload: ByteArray) {
-        val txt = String(payload)
-        log("← echoed: $txt")
+        log("Message on stream $streamType (${payload.size} bytes)")
+    }
+
+    override fun onKeyframeRequest() {
+        ScreenCaptureService.requestKeyframe()
     }
 
     override fun onVideoStreamReady() {
-        Log.i(TAG, "Video stream ready event received")
-        log("Video stream ready — host is accepting video.")
+        log("Computer is ready to show your screen")
     }
+
+    // ── Input injection (from the computer) ────────────────────────────────
 
     private var dragStartXNorm: Int = 0
     private var dragStartYNorm: Int = 0
@@ -652,18 +442,20 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
         InputService.instance?.injectNavAction(action)
     }
 
+    // ── Notifications, clipboard, handoff ──────────────────────────────────
+
     override fun onNotificationAction(key: String, actionId: Int) {
-        log("Triggering notification action $actionId on $key")
+        log("Running notification action $actionId on $key")
         NotificationService.instance?.invokeAction(key, actionId)
     }
 
     override fun onNotificationDismiss(key: String) {
-        log("Dismissing notification $key from host")
+        log("Dismissing notification $key from computer")
         NotificationService.instance?.dismiss(key)
     }
 
     override fun onDndSync(enabled: Boolean) {
-        log("DND sync received from host: enabled=$enabled")
+        log("Do Not Disturb from computer: $enabled")
         val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         if (nm.isNotificationPolicyAccessGranted) {
             val filter = if (enabled) {
@@ -672,19 +464,18 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
                 android.app.NotificationManager.INTERRUPTION_FILTER_ALL
             }
             nm.setInterruptionFilter(filter)
-            log("Phone DND filter set to: ${if (enabled) "PRIORITY (active)" else "ALL (inactive)"}")
         } else {
-            log("DND sync: Notification Policy access not granted on device; enable in Settings")
+            log("Do Not Disturb sync skipped: access not granted")
         }
     }
 
     override fun onClipboardReceived(originId: String, contentType: Int, mimeType: String, payload: ByteArray) {
-        log("Clipboard item received from $originId (type=$contentType, mime=$mimeType, size=${payload.size})")
+        log("Clipboard from $originId ($mimeType, ${payload.size} bytes)")
         ClipboardService.instance?.writeRemoteClip(originId, contentType, mimeType, payload)
     }
 
     override fun onHandoffReceived(sessionId: Long, handoffType: Int, appId: String, uri: String, title: String, stateJson: String) {
-        log("Handoff received from host: type=$handoffType title=\"$title\"")
+        log("Handoff from computer: \"$title\"")
         val service = handoffService
         if (service == null) {
             Log.w(TAG, "Handoff dropped: HandoffService not bound yet")
@@ -698,6 +489,6 @@ class MainActivity : Activity(), DiscoveryManager.DiscoveryListener, QuicClient.
         // gates AmbientEventBus::query in linux/src/ambient.rs) — this device has no
         // local policy store to update yet. Logged so a host-initiated policy push is
         // at least visible on the phone rather than silently discarded.
-        log("Host updated agent consent: notifications=$allowNotifications clipboard=$allowClipboard rawVideo=$allowRawVideo")
+        log("Computer updated agent consent: notifications=$allowNotifications clipboard=$allowClipboard rawVideo=$allowRawVideo")
     }
 }
