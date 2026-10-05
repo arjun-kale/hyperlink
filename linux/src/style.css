@@ -1,0 +1,182 @@
+/* HyperLink host — design tokens and styles.
+ *
+ * Builds on libadwaita's named colors and type scale (title-1, heading, body,
+ * caption…) so the app reads as part of the desktop; this file only adds the
+ * brand accent, the "link light" backdrop, and glass surfaces.
+ *
+ * Color meaning (never decorative):
+ *   accent  — the link itself: primary actions, live connection state
+ *   success — linked / working
+ *   warning — needs attention, recoverable
+ *   danger  — destructive or failed
+ */
+
+/* Brand blue, from the HyperLink logo (docs/brand/hyperlink-logo.svg). */
+@define-color hl_link_a #2366ff;
+@define-color hl_link_hi #3d7bff;
+@define-color hl_link_lo #1c56f0;
+@define-color hl_link_b #5aa9ff;
+@define-color hl_success #2fb380;
+@define-color hl_warning #e8a23a;
+
+/* Brand accent replaces the default accent. White on #2366ff is 4.7:1.
+   (libadwaita 1.6+ reads CSS variables instead; see accent_vars in app_window.rs.) */
+@define-color accent_bg_color @hl_link_a;
+@define-color accent_fg_color #ffffff;
+
+/* ── Backdrop ─────────────────────────────────────────────────────────── */
+
+/* Two soft light fields behind the home screen: the "link" between devices.
+   Static — motion is reserved for state changes. */
+.hl-backdrop {
+  background-image:
+    radial-gradient(circle farthest-side at 12% 0%, alpha(@hl_link_a, 0.22), transparent),
+    radial-gradient(circle farthest-side at 100% 100%, alpha(@hl_link_b, 0.16), transparent);
+}
+
+.hl-light .hl-backdrop {
+  background-image:
+    radial-gradient(circle farthest-side at 12% 0%, alpha(@hl_link_a, 0.12), transparent),
+    radial-gradient(circle farthest-side at 100% 100%, alpha(@hl_link_b, 0.10), transparent);
+}
+
+/* ── Glass surfaces ───────────────────────────────────────────────────── */
+
+.hl-glass {
+  border-radius: 24px;
+  padding: 24px;
+  background-color: alpha(white, 0.05);
+  border: 1px solid alpha(white, 0.10);
+  box-shadow:
+    inset 0 1px alpha(white, 0.08),
+    0 16px 40px -12px alpha(black, 0.45);
+}
+
+.hl-light .hl-glass {
+  background-color: alpha(white, 0.72);
+  border: 1px solid alpha(black, 0.06);
+  box-shadow:
+    inset 0 1px white,
+    0 16px 40px -16px alpha(#1c2a5a, 0.22);
+}
+
+/* Floating glass over the mirrored screen (see glass.rs for the blur). */
+glasspanel {
+  box-shadow: 0 18px 44px -10px alpha(black, 0.55);
+  border-radius: 22px;
+}
+
+/* ── Hero ─────────────────────────────────────────────────────────────── */
+
+.hl-hero-icon {
+  min-width: 96px;
+  min-height: 96px;
+  border-radius: 32px;
+  color: white;
+  background-image: linear-gradient(to bottom, @hl_link_hi, @hl_link_lo);
+  box-shadow: 0 18px 40px -14px alpha(@hl_link_a, 0.75);
+  -gtk-icon-size: 52px;
+}
+
+.hl-hero-icon.success {
+  background-image: linear-gradient(to bottom, #3cc48f, #1f9d6d);
+  box-shadow: 0 18px 40px -14px alpha(@hl_success, 0.7);
+}
+
+.hl-hero-icon.idle {
+  background-image: none;
+  background-color: alpha(currentColor, 0.08);
+  color: alpha(currentColor, 0.75);
+  box-shadow: none;
+}
+
+/* ── Status chip ──────────────────────────────────────────────────────── */
+
+.hl-chip {
+  border-radius: 999px;
+  padding: 4px 12px;
+  background-color: alpha(currentColor, 0.08);
+  font-weight: 600;
+}
+
+.hl-dot {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.4);
+}
+
+.hl-dot.success { background-color: @hl_success; }
+.hl-dot.warning { background-color: @hl_warning; }
+.hl-dot.accent  { background-color: @hl_link_a; }
+
+/* ── Steps ────────────────────────────────────────────────────────────── */
+
+.hl-step-number {
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: 999px;
+  background-color: alpha(@hl_link_a, 0.20);
+  color: mix(@hl_link_a, white, 0.35);
+  font-weight: 700;
+}
+
+/* ── Pairing codes ────────────────────────────────────────────────────── */
+
+/* Large targets: picking the wrong code ends pairing, so these are easy to read
+   and hard to mis-click. */
+.hl-code-button {
+  min-height: 72px;
+  min-width: 220px;
+  border-radius: 20px;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  font-feature-settings: "tnum";
+}
+
+/* ── Countdown ────────────────────────────────────────────────────────── */
+
+.hl-countdown {
+  font-feature-settings: "tnum";
+}
+
+/* ── Mirror ───────────────────────────────────────────────────────────── */
+
+/* A dim stage keeps attention on the phone screen in either color scheme. */
+/* The mirror stage. Its glow is drawn by AmbientStage (glass.rs); this just
+   matches the header to the stage base color in each scheme. */
+.hl-stage { background-color: #0b0d12; }
+.hl-light .hl-stage { background-color: #eceef3; }
+
+.hl-phone {
+  border-radius: 28px;
+  box-shadow: 0 30px 80px -20px alpha(black, 0.8), 0 0 0 1px alpha(white, 0.08);
+}
+
+.hl-dock-button {
+  min-width: 48px;
+  min-height: 48px;
+  border-radius: 16px;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+}
+
+.hl-dock-button:hover   { background-color: alpha(currentColor, 0.12); }
+.hl-dock-button:active  { background-color: alpha(currentColor, 0.20); }
+.hl-dock-button:checked { background-color: alpha(@hl_link_a, 0.55); color: white; }
+
+.hl-dock-separator {
+  min-width: 1px;
+  margin: 10px 4px;
+  background-color: alpha(currentColor, 0.18);
+}
+
+.hl-stats {
+  font-feature-settings: "tnum";
+  padding: 6px 12px;
+}
+
+.hl-light .hl-step-number { color: @hl_link_lo; }

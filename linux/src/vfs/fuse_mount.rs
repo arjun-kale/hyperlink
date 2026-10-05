@@ -523,14 +523,19 @@ pub fn mount_fuse(
     runtime: tokio::runtime::Handle,
 ) -> anyhow::Result<fuser::BackgroundSession> {
     info!(mountpoint = %mountpoint, "mounting HyperLink virtual filesystem");
+    // A previous run that crashed can leave a dead mount here ("Transport endpoint
+    // is not connected"); clear it first. Failing just means there wasn't one.
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", "-q", mountpoint])
+        .status();
     std::fs::create_dir_all(mountpoint)?;
 
     let fs = HyperLinkFuse::new(client, cache, runtime);
     let mut config = Config::default();
-    config.mount_options = vec![
-        fuser::MountOption::FSName("hyperlink".to_string()),
-        fuser::MountOption::AutoUnmount,
-    ];
+    // No AutoUnmount: it requires allow_other/allow_root, which needs
+    // `user_allow_other` in /etc/fuse.conf. The caller unmounts by dropping the
+    // returned session when the phone disconnects.
+    config.mount_options = vec![fuser::MountOption::FSName("hyperlink".to_string())];
 
     let session = fuser::spawn_mount(fs, mountpoint, &config)?;
     info!(mountpoint = %mountpoint, "HyperLink virtual filesystem mounted successfully");

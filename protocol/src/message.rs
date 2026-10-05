@@ -30,6 +30,9 @@ pub enum MessageType {
     VideoConfig = 0x31,
     /// Receiver bitrate feedback (host → phone, reliable).
     BitrateAck = 0x32,
+    /// Host lost a frame and asks for a fresh keyframe so the decoder can
+    /// recover immediately (host → phone, on the input stream, empty payload).
+    KeyframeRequest = 0x33,
     // --- Phase 3: input stream messages (0x40–0x4F) ---
     /// Pointer movement / click / touch event (host → phone, reliable).
     PointerEvent = 0x40,
@@ -146,6 +149,7 @@ impl TryFrom<u8> for MessageType {
             0x30 => Ok(Self::VideoFrame),
             0x31 => Ok(Self::VideoConfig),
             0x32 => Ok(Self::BitrateAck),
+            0x33 => Ok(Self::KeyframeRequest),
             0x40 => Ok(Self::PointerEvent),
             0x41 => Ok(Self::KeyEvent),
             0x42 => Ok(Self::ScrollEvent),
@@ -208,6 +212,7 @@ impl std::fmt::Display for MessageType {
             Self::VideoFrame => write!(f, "VideoFrame"),
             Self::VideoConfig => write!(f, "VideoConfig"),
             Self::BitrateAck => write!(f, "BitrateAck"),
+            Self::KeyframeRequest => write!(f, "KeyframeRequest"),
             Self::PointerEvent => write!(f, "PointerEvent"),
             Self::KeyEvent => write!(f, "KeyEvent"),
             Self::ScrollEvent => write!(f, "ScrollEvent"),
@@ -273,6 +278,7 @@ mod tests {
             MessageType::VideoFrame,
             MessageType::VideoConfig,
             MessageType::BitrateAck,
+            MessageType::KeyframeRequest,
             MessageType::PointerEvent,
             MessageType::KeyEvent,
             MessageType::ScrollEvent,

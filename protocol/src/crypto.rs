@@ -10,6 +10,7 @@ use rustls::{DigitallySignedStruct, Error, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Compute the SHA-256 fingerprint of a DER-encoded certificate.
@@ -157,8 +158,10 @@ impl ServerCertVerifier for TofuServerVerifier {
 pub struct TofuClientVerifier {
     /// Set of trusted client fingerprints.
     trusted_fingerprints: Arc<Mutex<HashSet<[u8; 32]>>>,
-    /// Whether we are currently in pairing mode (accepts any cert temporarily).
-    is_pairing: bool,
+    /// Whether a pairing window is currently open (accepts any cert temporarily).
+    /// Shared so the host can open and close pairing at runtime without
+    /// rebuilding the endpoint.
+    pairing_open: Arc<AtomicBool>,
     /// Shareable slot to write the verified peer fingerprint during pairing.
     pending_state: Option<Arc<Mutex<PendingPairingState>>>,
     /// Cryptographic algorithms supported by default provider.
@@ -171,11 +174,26 @@ impl TofuClientVerifier {
         is_pairing: bool,
         pending_state: Option<Arc<Mutex<PendingPairingState>>>,
     ) -> Self {
+        Self::with_pairing_switch(
+            trusted_fingerprints,
+            Arc::new(AtomicBool::new(is_pairing)),
+            pending_state,
+        )
+    }
+
+    /// Like [`Self::new`], but pairing mode follows `pairing_open`, which the
+    /// caller can flip at any time. Already-trusted certificates are accepted
+    /// either way; unknown ones only while the switch is on.
+    pub fn with_pairing_switch(
+        trusted_fingerprints: Arc<Mutex<HashSet<[u8; 32]>>>,
+        pairing_open: Arc<AtomicBool>,
+        pending_state: Option<Arc<Mutex<PendingPairingState>>>,
+    ) -> Self {
         let supported_algos =
             rustls::crypto::ring::default_provider().signature_verification_algorithms;
         Self {
             trusted_fingerprints,
-            is_pairing,
+            pairing_open,
             pending_state,
             supported_algos,
         }
@@ -191,7 +209,7 @@ impl ClientCertVerifier for TofuClientVerifier {
     ) -> Result<ClientCertVerified, Error> {
         let fp = compute_fingerprint(end_entity.as_ref());
 
-        if self.is_pairing {
+        if self.pairing_open.load(Ordering::SeqCst) {
             // In pairing mode, accept any certificate but record the fingerprint.
             if let Some(ref pending) = self.pending_state {
                 let mut state = pending.lock().unwrap();

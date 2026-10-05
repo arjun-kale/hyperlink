@@ -14,14 +14,26 @@ use tracing::{error, info, warn};
 
 /// Encapsulates the GStreamer decode pipeline.
 ///
-/// Pipeline layout:
-///   appsrc → h264parse → (vaapidecodebin | avdec_h264) → videoconvert → gtk4paintablesink
+/// Pipeline layout (tuned for latency, not smoothness):
+///   appsrc → h264parse → (vah264dec | vaapidecodebin | nvh264dec | avdec_h264)
+///     → videoconvert → queue (1 frame, leaky) → gtk4paintablesink (sync=false)
+///
+/// The sink shows each frame as soon as it's decoded instead of waiting for its
+/// timestamp, and the leaky one-frame queue drops a decoded frame rather than
+/// let them pile up behind a busy UI thread: with live mirroring, an old frame
+/// is never worth showing.
 pub struct VideoPipeline {
     pipeline: gst::Pipeline,
     appsrc: gst_app::AppSrc,
-    frame_count: u64,
-    base_pts: Option<u64>,
     _bus_watch_guard: gst::bus::BusWatchGuard,
+}
+
+/// A thread-safe handle for feeding encoded frames into the pipeline, used
+/// directly from the network task so video never waits on the UI thread.
+#[derive(Clone)]
+pub struct VideoInput {
+    appsrc: gst_app::AppSrc,
+    base_pts: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl VideoPipeline {
@@ -68,9 +80,23 @@ impl VideoPipeline {
             .build()
             .context("failed to create videoconvert element")?;
 
-        // Sink: gtk4paintablesink for GTK4 integration.
+        // One decoded frame of slack, dropping the older one when full. Also
+        // decouples the decoder thread from the sink, which hands frames to the
+        // GTK main thread.
+        let queue = gst::ElementFactory::make("queue")
+            .name("latest-frame")
+            .property("max-size-buffers", 1u32)
+            .property("max-size-bytes", 0u32)
+            .property("max-size-time", 0u64)
+            .build()
+            .context("failed to create queue element")?;
+        queue.set_property_from_str("leaky", "downstream");
+
+        // Sink: gtk4paintablesink for GTK4 integration. sync=false: show frames
+        // as they arrive; there's nothing to synchronize a live mirror against.
         let sink = gst::ElementFactory::make("gtk4paintablesink")
             .name("video-sink")
+            .property("sync", false)
             .build()
             .context(
                 "failed to create gtk4paintablesink — install gstreamer1.0-plugins-bad with GTK4 support",
@@ -78,11 +104,25 @@ impl VideoPipeline {
 
         // Add all elements and link.
         pipeline
-            .add_many([appsrc.upcast_ref(), &parser, &decoder, &convert, &sink])
+            .add_many([
+                appsrc.upcast_ref(),
+                &parser,
+                &decoder,
+                &convert,
+                &queue,
+                &sink,
+            ])
             .context("failed to add elements to pipeline")?;
 
-        gst::Element::link_many([appsrc.upcast_ref(), &parser, &decoder, &convert, &sink])
-            .context("failed to link pipeline elements")?;
+        gst::Element::link_many([
+            appsrc.upcast_ref(),
+            &parser,
+            &decoder,
+            &convert,
+            &queue,
+            &sink,
+        ])
+        .context("failed to link pipeline elements")?;
 
         // Set up error handling on the bus.
         let bus = pipeline.bus().unwrap();
@@ -117,15 +157,23 @@ impl VideoPipeline {
         Ok(Self {
             pipeline,
             appsrc,
-            frame_count: 0,
-            base_pts: None,
             _bus_watch_guard: bus_watch_guard,
         })
     }
 
-    /// Try VAAPI hardware decoder first, fall back to software on failure.
+    /// Try hardware decoders first, fall back to software on failure.
     fn create_decoder_with_fallback() -> Result<gst::Element> {
-        // Try vaapidecodebin (Intel/AMD).
+        // GStreamer's current VA-API plugin (Intel/AMD); the older vaapi
+        // elements below are deprecated and often not installed anymore.
+        if let Ok(dec) = gst::ElementFactory::make("vah264dec")
+            .name("decoder")
+            .build()
+        {
+            info!("using VA hardware decoder (vah264dec)");
+            return Ok(dec);
+        }
+
+        // Try vaapidecodebin (Intel/AMD, legacy plugin).
         if let Ok(dec) = gst::ElementFactory::make("vaapidecodebin")
             .name("decoder")
             .build()
@@ -149,10 +197,24 @@ impl VideoPipeline {
 
     /// Create software-only H.264 decoder.
     fn create_software_decoder() -> Result<gst::Element> {
-        gst::ElementFactory::make("avdec_h264")
+        let dec = gst::ElementFactory::make("avdec_h264")
             .name("decoder")
             .build()
-            .context("failed to create avdec_h264 software decoder")
+            .context("failed to create avdec_h264 software decoder")?;
+        // Frame threading holds (threads - 1) frames before output; slice
+        // threading adds no delay.
+        if dec.find_property("thread-type").is_some() {
+            dec.set_property_from_str("thread-type", "slice");
+        }
+        Ok(dec)
+    }
+
+    /// A handle for pushing frames from any thread.
+    pub fn input(&self) -> VideoInput {
+        VideoInput {
+            appsrc: self.appsrc.clone(),
+            base_pts: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
     /// Returns the GDK paintable from the sink, for binding to a GTK4 `Picture` widget.
@@ -185,37 +247,6 @@ impl VideoPipeline {
         Ok(())
     }
 
-    /// Push a raw H.264 NAL unit into the pipeline for decoding.
-    ///
-    /// `timestamp_us` is the capture timestamp from the sender.
-    /// `is_keyframe` marks IDR frames for GStreamer buffer flags.
-    pub fn push_frame(&mut self, nal_data: &[u8], timestamp_us: u64, is_keyframe: bool) {
-        // Set base PTS from the first frame's timestamp.
-        let base = *self.base_pts.get_or_insert(timestamp_us);
-        let pts_ns = (timestamp_us.saturating_sub(base)) * 1000; // µs → ns
-
-        let mut buffer = gst::Buffer::with_size(nal_data.len()).unwrap();
-        {
-            let buffer_ref = buffer.get_mut().unwrap();
-            buffer_ref.set_pts(ClockTime::from_nseconds(pts_ns));
-
-            if is_keyframe {
-                // No special flags needed; h264parse infers keyframes from NAL type.
-            } else {
-                buffer_ref.set_flags(gst::BufferFlags::DELTA_UNIT);
-            }
-
-            let mut map = buffer_ref.map_writable().unwrap();
-            map.copy_from_slice(nal_data);
-        }
-
-        if let Err(e) = self.appsrc.push_buffer(buffer) {
-            error!("failed to push buffer to appsrc: {}", e);
-        }
-
-        self.frame_count += 1;
-    }
-
     /// Push SPS/PPS codec data as a stream header.
     ///
     /// This is sent once before the first frame and again on each keyframe
@@ -246,11 +277,29 @@ impl VideoPipeline {
             pps.len()
         );
     }
+}
 
-    /// Returns the total number of frames pushed so far.
-    #[allow(dead_code)]
-    pub fn frame_count(&self) -> u64 {
-        self.frame_count
+impl VideoInput {
+    /// Push one encoded H.264 access unit. Safe to call from any thread.
+    ///
+    /// `timestamp_us` is the sender's capture timestamp; it's only used to keep
+    /// buffer timestamps increasing, since the sink doesn't sync to them.
+    pub fn push_frame(&self, nal_data: &[u8], timestamp_us: u64, is_keyframe: bool) {
+        let base = *self.base_pts.lock().unwrap().get_or_insert(timestamp_us);
+        let pts_ns = timestamp_us.saturating_sub(base) * 1000; // µs → ns
+
+        let mut buffer = gst::Buffer::from_mut_slice(nal_data.to_vec());
+        {
+            let buffer_ref = buffer.get_mut().unwrap();
+            buffer_ref.set_pts(ClockTime::from_nseconds(pts_ns));
+            if !is_keyframe {
+                buffer_ref.set_flags(gst::BufferFlags::DELTA_UNIT);
+            }
+        }
+
+        if let Err(e) = self.appsrc.push_buffer(buffer) {
+            error!("failed to push buffer to appsrc: {}", e);
+        }
     }
 }
 

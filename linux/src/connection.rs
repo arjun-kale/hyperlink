@@ -1,8 +1,9 @@
 //! Quinn server configuration, mutual TLS (mTLS) verifications, and client session loops.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use quinn::Endpoint;
@@ -11,6 +12,79 @@ use tracing::{debug, error, info, warn};
 
 use hyperlink_protocol::config::DeviceConfig;
 use hyperlink_protocol::crypto::{self, PendingPairingState, TofuClientVerifier};
+
+/// Minimum spacing between keyframe requests to the phone after frame loss.
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long an unanswered pairing request waits for the user before it's
+/// treated as a rejection.
+const PAIRING_DECISION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Live server state the GUI needs to reach into: the pairing switch the
+/// client verifier follows, the in-memory trust set, and the sessions that are
+/// currently up (so revoking a device can drop it immediately).
+struct ServerHandles {
+    pairing_open: Arc<AtomicBool>,
+    #[cfg_attr(not(feature = "video"), allow(dead_code))]
+    trusted: Arc<Mutex<HashSet<[u8; 32]>>>,
+    sessions: Mutex<Vec<([u8; 32], quinn::Connection)>>,
+}
+
+static SERVER: OnceLock<ServerHandles> = OnceLock::new();
+
+/// Opens or closes the window during which an unknown phone may pair. While
+/// closed, unknown certificates are rejected during the TLS handshake itself.
+pub fn set_pairing_open(open: bool) {
+    if let Some(server) = SERVER.get() {
+        server.pairing_open.store(open, Ordering::SeqCst);
+        info!(open, "pairing window changed");
+    }
+}
+
+/// Removes a device from the live trust set and drops its session if it's
+/// connected. The caller is responsible for persisting the config change.
+#[cfg_attr(not(feature = "video"), allow(dead_code))]
+pub fn revoke_device(fingerprint: &str) {
+    let Some(server) = SERVER.get() else { return };
+    let Ok(fp) = crypto::string_to_fingerprint(fingerprint) else {
+        return;
+    };
+    server.trusted.lock().unwrap().remove(&fp);
+    for (session_fp, conn) in server.sessions.lock().unwrap().iter() {
+        if *session_fp == fp {
+            conn.close(0u32.into(), b"device revoked");
+            info!("closed session for revoked device");
+        }
+    }
+}
+
+/// Sends a session event to the GUI, if one is running.
+fn notify_gui(event: crate::SessionEvent) {
+    #[cfg(feature = "video")]
+    if let Some(tx) = crate::UI_SENDER.get() {
+        let _ = tx.try_send(crate::VideoGuiMessage::Session(event));
+    }
+    #[cfg(not(feature = "video"))]
+    let _ = event;
+}
+
+/// Tells the GUI a session ended, however `handle_incoming_connection` exits.
+struct SessionGuard {
+    fingerprint: [u8; 32],
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if let Some(server) = SERVER.get() {
+            server
+                .sessions
+                .lock()
+                .unwrap()
+                .retain(|(fp, _)| *fp != self.fingerprint);
+        }
+        notify_gui(crate::SessionEvent::PhoneDisconnected);
+    }
+}
 
 /// Starts the QUIC server and listens for incoming connections.
 pub async fn start_server(
@@ -27,11 +101,19 @@ pub async fn start_server(
 
     let trusted_set = Arc::new(Mutex::new(config.get_trusted_fingerprints_set()));
     let pending_state = Arc::new(Mutex::new(PendingPairingState::default()));
+    let pairing_open = Arc::new(AtomicBool::new(is_pairing));
 
-    // Custom client verifier.
-    let verifier = Arc::new(TofuClientVerifier::new(
+    let _ = SERVER.set(ServerHandles {
+        pairing_open: pairing_open.clone(),
+        trusted: trusted_set.clone(),
+        sessions: Mutex::new(Vec::new()),
+    });
+
+    // Custom client verifier. It follows `pairing_open` live, so the GUI can open
+    // a pairing window without restarting the server.
+    let verifier = Arc::new(TofuClientVerifier::with_pairing_switch(
         trusted_set.clone(),
-        is_pairing,
+        pairing_open.clone(),
         Some(pending_state.clone()),
     ));
 
@@ -61,24 +143,19 @@ pub async fn start_server(
     let config_path_arc = Arc::new(config_path);
 
     // Bounds how long an operator-initiated `--pair` window stays open (see
-    // docs/SECURITY_REVIEW.md finding #3): the underlying rustls verifier accepts
-    // any certificate for the lifetime of this endpoint (a static per-connection
-    // config, not dynamically revocable without deeper surgery — documented as an
-    // inherent TOFU tradeoff, finding #1), but nothing requires this process to
-    // keep *accepting new connection attempts* into that state indefinitely.
-    // `pairing_open` closes that higher-level window after the first pairing
-    // attempt resolves (accepted or rejected) or after a fixed timeout, whichever
-    // comes first — bounding both the prompt-spam and MITM-window surface without
-    // touching the well-tested verifier itself.
+    // docs/SECURITY_REVIEW.md finding #3). The verifier only accepts unknown
+    // certificates while `pairing_open` is set, so closing it here (after a
+    // timeout, or once one pairing attempt resolves below) ends the
+    // accept-any-cert window at the TLS layer. The GUI drives the same switch
+    // through `set_pairing_open` and runs its own visible countdown.
     const PAIRING_WINDOW_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-    let pairing_open = Arc::new(AtomicBool::new(is_pairing));
     if is_pairing {
         let pairing_open_timeout = pairing_open.clone();
         tokio::spawn(async move {
             tokio::time::sleep(PAIRING_WINDOW_TIMEOUT).await;
             if pairing_open_timeout.swap(false, Ordering::SeqCst) {
                 warn!(
-                    "pairing window closed after {}s with no completed pairing — restart with --pair to try again",
+                    "pairing window closed after {}s with no completed pairing",
                     PAIRING_WINDOW_TIMEOUT.as_secs()
                 );
             }
@@ -100,33 +177,17 @@ pub async fn start_server(
             }
         };
 
-        // If this server was started in pairing mode but the pairing window has
-        // already closed (one attempt resolved, or the timeout fired), don't even
-        // hand this connection a pairing prompt — close it immediately rather than
-        // silently accepting-any-cert indefinitely.
-        if is_pairing && !pairing_open.load(Ordering::SeqCst) {
-            warn!("rejecting connection attempt: pairing window already closed");
-            tokio::spawn(async move {
-                if let Ok(conn) = connecting.await {
-                    conn.close(0u32.into(), b"pairing window closed");
-                }
-            });
-            continue;
-        }
-
         let config_clone = config_arc.clone();
         let config_path_clone = config_path_arc.clone();
-        let pending_state_clone = pending_state.clone();
         let certs_clone = certs.clone();
-        let pairing_open_clone = pairing_open.clone();
+        let trusted_clone = trusted_set.clone();
 
         tokio::spawn(async move {
             info!("incoming connection from client...");
             match handle_incoming_connection(
                 connecting,
-                is_pairing,
                 certs_clone,
-                pending_state_clone,
+                trusted_clone,
                 config_clone,
                 config_path_clone,
             )
@@ -139,92 +200,152 @@ pub async fn start_server(
                     error!("client session error: {}", e);
                 }
             }
-            // Whether pairing was accepted or rejected, this attempt has resolved —
-            // close the window for any further connections in this run.
-            if is_pairing {
-                pairing_open_clone.store(false, Ordering::SeqCst);
-            }
         });
     }
 
     Ok(())
 }
 
+/// The user's answer to a pairing request.
+#[derive(PartialEq, Eq)]
+enum PairingAnswer {
+    Accepted,
+    Rejected,
+    /// Nobody answered within `PAIRING_DECISION_TIMEOUT`.
+    TimedOut,
+}
+
+/// Asks the user whether to trust a new phone. With the GUI, the request goes to
+/// the main window; headless builds fall back to a terminal prompt.
+async fn ask_user_to_pair(pin: u32, fingerprint: &str) -> PairingAnswer {
+    #[cfg(feature = "video")]
+    if let Some(tx) = crate::UI_SENDER.get() {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let request = crate::VideoGuiMessage::PairingRequest {
+            pin,
+            reply: reply_tx,
+        };
+        if tx.send(request).await.is_err() {
+            return PairingAnswer::Rejected;
+        }
+        return match tokio::time::timeout(PAIRING_DECISION_TIMEOUT, reply_rx).await {
+            Ok(Ok(true)) => PairingAnswer::Accepted,
+            Ok(_) => PairingAnswer::Rejected,
+            Err(_) => PairingAnswer::TimedOut,
+        };
+    }
+
+    println!("\n╔══════════════════════════════════════════════════════════╗");
+    println!("║              PAIRING REQUEST RECEIVED                    ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!("  Client certificate fingerprint: {}", fingerprint);
+    println!("  Mutual validation PIN:          {:06}", pin);
+    println!("  Do you trust this device? (y/n): ");
+
+    let read = tokio::task::spawn_blocking(|| {
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_ok() {
+            let trimmed = input.trim().to_lowercase();
+            trimmed == "y" || trimmed == "yes"
+        } else {
+            false
+        }
+    });
+    match tokio::time::timeout(PAIRING_DECISION_TIMEOUT, read).await {
+        Ok(Ok(true)) => PairingAnswer::Accepted,
+        Ok(_) => PairingAnswer::Rejected,
+        Err(_) => PairingAnswer::TimedOut,
+    }
+}
+
 async fn handle_incoming_connection(
     connecting: quinn::Connecting,
-    is_pairing: bool,
     our_certs: Vec<CertificateDer<'static>>,
-    pending_state: Arc<Mutex<PendingPairingState>>,
+    trusted_set: Arc<Mutex<HashSet<[u8; 32]>>>,
     config_arc: Arc<Mutex<DeviceConfig>>,
     config_path: Arc<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let connection = connecting.await?;
     info!("QUIC handshake complete!");
 
-    if is_pairing {
-        let peer_fp = {
-            let state = pending_state.lock().unwrap();
-            state.peer_fingerprint
-        };
-        if let Some(fp) = peer_fp {
-            let our_fp = crypto::compute_fingerprint(&our_certs[0]);
-            let pin = crypto::generate_pairing_pin(&fp, &our_fp);
+    // Read the fingerprint from this connection's own peer certificate rather than
+    // the verifier's shared pending slot, which two simultaneous handshakes could
+    // overwrite.
+    let fp = connection
+        .peer_identity()
+        .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
+        .and_then(|certs| certs.first().map(|c| crypto::compute_fingerprint(c)))
+        .ok_or_else(|| anyhow::anyhow!("client presented no certificate"))?;
+    let fp_str = crypto::fingerprint_to_string(&fp);
 
-            println!("\n╔══════════════════════════════════════════════════════════╗");
-            println!("║              PAIRING REQUEST RECEIVED                    ║");
-            println!("╚══════════════════════════════════════════════════════════╝");
-            println!(
-                "  Client certificate fingerprint: {}",
-                crypto::fingerprint_to_string(&fp)
-            );
-            println!("  Mutual validation PIN:          {:06}", pin);
-            println!("  Do you trust this device? (y/n): ");
+    let already_trusted = trusted_set.lock().unwrap().contains(&fp);
+    if !already_trusted {
+        // The verifier only lets an unknown certificate through while pairing is
+        // open, so this is a pairing attempt. Whatever the outcome, it uses up the
+        // window: one attempt per window, as before.
+        set_pairing_open(false);
 
-            // Wait for user confirmation in terminal.
-            let confirmed = tokio::task::spawn_blocking(move || {
-                let mut input = String::new();
-                if std::io::stdin().read_line(&mut input).is_ok() {
-                    let trimmed = input.trim().to_lowercase();
-                    trimmed == "y" || trimmed == "yes"
-                } else {
-                    false
-                }
-            })
-            .await?;
+        let our_fp = crypto::compute_fingerprint(&our_certs[0]);
+        let pin = crypto::generate_pairing_pin(&fp, &our_fp);
 
-            if !confirmed {
-                warn!("pairing rejected by user, closing connection");
+        match ask_user_to_pair(pin, &fp_str).await {
+            PairingAnswer::Accepted => {}
+            PairingAnswer::Rejected => {
+                warn!("pairing rejected, closing connection");
                 connection.close(0u32.into(), b"pairing rejected");
                 return Err(anyhow::anyhow!("pairing rejected by user"));
             }
-
-            // Save the trusted client fingerprint. Every companion currently presents
-            // the same name, so a second phone gets a fingerprint-suffixed entry
-            // rather than evicting the first phone's trust.
-            let fp_str = crypto::fingerprint_to_string(&fp);
-            {
-                let mut config = config_arc.lock().unwrap();
-                let key = config.add_trusted_peer_unique("Android-Companion", &fp_str);
-                info!(
-                    "pairing accepted, trusting {:?} with fingerprint: {}",
-                    key, fp_str
-                );
-                config.save(&config_path)?;
+            PairingAnswer::TimedOut => {
+                warn!("pairing request went unanswered, closing connection");
+                connection.close(0u32.into(), b"pairing timed out");
+                return Err(anyhow::anyhow!("pairing request timed out"));
             }
-        } else {
-            connection.close(0u32.into(), b"pairing error");
-            return Err(anyhow::anyhow!(
-                "failed to capture client certificate fingerprint"
-            ));
         }
+
+        // Every companion currently presents the same name, so a second phone gets
+        // a fingerprint-suffixed entry rather than evicting the first phone's trust.
+        {
+            let mut config = config_arc.lock().unwrap();
+            let key = config.add_trusted_peer_unique("Android-Companion", &fp_str);
+            info!(
+                "pairing accepted, trusting {:?} with fingerprint: {}",
+                key, fp_str
+            );
+            config.save(&config_path)?;
+            crate::refresh_proximity_trust(&config.trusted_peers);
+        }
+        trusted_set.lock().unwrap().insert(fp);
     } else {
         info!("paired client connected securely");
     }
+
+    if let Some(server) = SERVER.get() {
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .push((fp, connection.clone()));
+    }
+    let _session_guard = SessionGuard { fingerprint: fp };
+    let device_name = config_arc
+        .lock()
+        .unwrap()
+        .trusted_peers
+        .iter()
+        .find(|(_, v)| **v == fp_str)
+        .map(|(k, _)| k.clone())
+        .unwrap_or_else(|| "Android phone".to_string());
+    notify_gui(crate::SessionEvent::PhoneConnected { device_name });
+
+    // Set when the phone (re)starts a stream, so frame reassembly starts fresh.
+    let video_reset = Arc::new(AtomicBool::new(false));
+    let video_reset_uni = video_reset.clone();
 
     // Spawn background task to accept unidirectional streams (for VideoConfig)
     let conn_uni = connection.clone();
     tokio::spawn(async move {
         while let Ok(mut recv_stream) = conn_uni.accept_uni().await {
+            let video_reset_uni = video_reset_uni.clone();
             tokio::spawn(async move {
                 let mut stream_type_buf = [0u8; 1];
                 if recv_stream.read_exact(&mut stream_type_buf).await.is_ok() {
@@ -239,6 +360,7 @@ async fn handle_incoming_connection(
                                     if let Ok(config) =
                                         hyperlink_protocol::video::VideoConfig::decode(payload)
                                     {
+                                        video_reset_uni.store(true, Ordering::SeqCst);
                                         info!(
                                             "received video config: SPS={} bytes, PPS={} bytes",
                                             config.sps.len(),
@@ -265,78 +387,81 @@ async fn handle_incoming_connection(
 
     // Spawn background task to read datagrams (for VideoFrame)
     let conn_dg = connection.clone();
-    tokio::spawn(
-        #[allow(unused_variables, unused_assignments)]
-        async move {
-            let mut newest_seen_id = 0u32;
-            let mut current_frame_id: Option<u32> = None;
-            let mut fragments: Vec<Option<Vec<u8>>> = Vec::new();
-            let mut received_count = 0;
-            let mut current_is_keyframe = false;
-            let mut current_timestamp = 0u64;
-            let mut current_width = 0u16;
-            let mut current_height = 0u16;
+    let video_reset_dg = video_reset.clone();
+    tokio::spawn(async move {
+        let mut assembler = crate::video_assembler::FrameAssembler::new();
+        let mut last_report = std::time::Instant::now();
+        let mut last_keyframe_request: Option<std::time::Instant> = None;
 
-            while let Ok(datagram) = conn_dg.read_datagram().await {
-                if let Ok(hl_header) = hyperlink_protocol::version::Header::decode(&datagram) {
-                    if hl_header.message_type
-                        == hyperlink_protocol::message::MessageType::VideoFrame
-                    {
-                        let payload = &datagram[hyperlink_protocol::version::HEADER_SIZE..];
-                        if let Ok(video_header) =
-                            hyperlink_protocol::video::VideoFrameHeader::decode(payload)
-                        {
-                            if hyperlink_protocol::video::is_frame_stale(
-                                video_header.frame_id,
-                                newest_seen_id,
-                            ) {
-                                continue;
-                            }
-                            newest_seen_id = newest_seen_id.max(video_header.frame_id);
+        while let Ok(datagram) = conn_dg.read_datagram().await {
+            let Ok(hl_header) = hyperlink_protocol::version::Header::decode(&datagram) else {
+                continue;
+            };
+            if hl_header.message_type != hyperlink_protocol::message::MessageType::VideoFrame {
+                continue;
+            }
+            let payload = &datagram[hyperlink_protocol::version::HEADER_SIZE..];
+            let Ok(video_header) = hyperlink_protocol::video::VideoFrameHeader::decode(payload)
+            else {
+                continue;
+            };
+            // A new stream restarts the phone's frame numbering.
+            if video_reset_dg.swap(false, Ordering::SeqCst) {
+                assembler.reset();
+            }
 
-                            if current_frame_id != Some(video_header.frame_id) {
-                                current_frame_id = Some(video_header.frame_id);
-                                fragments = vec![None; video_header.fragment_count as usize];
-                                received_count = 0;
-                                current_is_keyframe = video_header.is_keyframe;
-                                current_timestamp = video_header.timestamp_us;
-                                current_width = video_header.width;
-                                current_height = video_header.height;
-                            }
+            let fragment = &payload[hyperlink_protocol::video::VIDEO_FRAME_HEADER_SIZE..];
+            let out = assembler.on_fragment(&video_header, fragment);
 
-                            let idx = video_header.fragment_idx as usize;
-                            if idx < fragments.len() && fragments[idx].is_none() {
-                                let fragment_payload =
-                                    &payload[hyperlink_protocol::video::VIDEO_FRAME_HEADER_SIZE..];
-                                fragments[idx] = Some(fragment_payload.to_vec());
-                                received_count += 1;
-
-                                if received_count == fragments.len() {
-                                    let mut full_frame = Vec::new();
-                                    for f in fragments.iter().flatten() {
-                                        full_frame.extend_from_slice(f);
-                                    }
-
-                                    #[cfg(feature = "video")]
-                                    if let Some(sender) = crate::UI_SENDER.get() {
-                                        let _ = sender
-                                            .send(crate::VideoGuiMessage::Frame {
-                                                data: full_frame,
-                                                timestamp_us: current_timestamp,
-                                                is_keyframe: current_is_keyframe,
-                                                width: current_width,
-                                                height: current_height,
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-                    }
+            // Ask for a fresh keyframe after a loss, at most a few times a second:
+            // one is enough to recover, and it takes a round trip to arrive.
+            if out.request_keyframe
+                && last_keyframe_request.is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_INTERVAL)
+            {
+                last_keyframe_request = Some(std::time::Instant::now());
+                #[cfg(feature = "video")]
+                if let Some(tx) = crate::INPUT_SENDER.get() {
+                    let _ = tx.try_send(crate::InputGuiMessage::KeyframeRequest);
                 }
             }
-        },
-    );
+
+            // Straight into the decoder from here: video never waits behind the
+            // UI thread. The GUI only gets lightweight stats.
+            #[cfg(feature = "video")]
+            if let Some(frame) = &out.frame {
+                if let Some(input) = crate::video_input() {
+                    input.push_frame(&frame.data, frame.timestamp_us, frame.is_keyframe);
+                }
+                if let Some(sender) = crate::UI_SENDER.get() {
+                    let _ = sender.try_send(crate::VideoGuiMessage::Frame {
+                        bytes: frame.data.len(),
+                        width: frame.width,
+                        height: frame.height,
+                    });
+                }
+            }
+            #[cfg(not(feature = "video"))]
+            let _ = out.frame;
+
+            if last_report.elapsed() >= Duration::from_secs(5) {
+                if assembler.frames_lost > 0 {
+                    warn!(
+                        frames_ok = assembler.frames_ok,
+                        frames_lost = assembler.frames_lost,
+                        "video frames lost in the last 5s"
+                    );
+                } else {
+                    debug!(
+                        frames_ok = assembler.frames_ok,
+                        "video frames received in the last 5s"
+                    );
+                }
+                assembler.frames_ok = 0;
+                assembler.frames_lost = 0;
+                last_report = std::time::Instant::now();
+            }
+        }
+    });
 
     // Phase 3: Open bidirectional input stream (type 0x40) from host to companion
     #[cfg(feature = "video")]
@@ -410,6 +535,10 @@ async fn handle_incoming_connection(
                             crate::InputGuiMessage::NotificationDismiss(dm) => (
                                 hyperlink_protocol::message::MessageType::NotificationDismiss,
                                 dm.encode(&mut payload),
+                            ),
+                            crate::InputGuiMessage::KeyframeRequest => (
+                                hyperlink_protocol::message::MessageType::KeyframeRequest,
+                                Ok(()),
                             ),
                         };
 
@@ -609,12 +738,26 @@ async fn handle_incoming_connection(
                 let client_clone = vfs_client.clone();
                 let cache_clone = vfs_cache.clone();
                 let rt_handle = tokio::runtime::Handle::current();
+                let conn_for_mount = conn_vfs.clone();
 
+                // Keep the mount for exactly as long as the phone is connected:
+                // dropping the session unmounts it. This is a plain thread (not a
+                // runtime worker), so blocking on the connection here is fine.
                 std::thread::spawn(move || {
-                    if let Err(e) =
-                        crate::vfs::mount_fuse(&mnt_str, client_clone, cache_clone, rt_handle)
-                    {
-                        warn!(error = %e, "FUSE mount not started (non-fatal, e.g. unprivileged sandbox or missing mountpoint)");
+                    match crate::vfs::mount_fuse(
+                        &mnt_str,
+                        client_clone,
+                        cache_clone,
+                        rt_handle.clone(),
+                    ) {
+                        Ok(session) => {
+                            rt_handle.block_on(conn_for_mount.closed());
+                            drop(session);
+                            info!(mountpoint = %mnt_str, "phone disconnected; unmounted its files");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "FUSE mount not started (non-fatal, e.g. unprivileged sandbox or missing mountpoint)");
+                        }
                     }
                 });
             }

@@ -160,31 +160,52 @@ impl VfsClient {
     }
 
     /// Executes request-response round-trip over stream 0x80.
+    ///
+    /// Bounded by `REQUEST_TIMEOUT`: file managers, GTK's mount monitor and the
+    /// kernel all wait on these, so an unanswered request must fail rather than
+    /// hang them. A timed-out reply could still arrive later and be mistaken for
+    /// the next request's, so a timeout also drops the stream; later requests
+    /// then fail fast until the phone reconnects.
     async fn round_trip(&self, packet: &[u8]) -> io::Result<Vec<u8>> {
         let mut guard = self.stream.lock().await;
         let (send, recv) = guard.as_mut().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotConnected, "VFS QUIC stream not connected")
         })?;
 
-        send.write_all(packet)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
+        let exchange = async {
+            send.write_all(packet)
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
 
-        let mut hdr_bytes = [0u8; hyperlink_protocol::version::HEADER_SIZE];
-        recv.read_exact(&mut hdr_bytes)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+            let mut hdr_bytes = [0u8; hyperlink_protocol::version::HEADER_SIZE];
+            recv.read_exact(&mut hdr_bytes)
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
 
-        let header = Header::decode(&hdr_bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let mut resp_payload = vec![0u8; header.payload_len as usize];
-        recv.read_exact(&mut resp_payload)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+            let header = Header::decode(&hdr_bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let mut resp_payload = vec![0u8; header.payload_len as usize];
+            recv.read_exact(&mut resp_payload)
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+            Ok(resp_payload)
+        };
 
-        Ok(resp_payload)
+        match tokio::time::timeout(REQUEST_TIMEOUT, exchange).await {
+            Ok(result) => result,
+            Err(_) => {
+                *guard = None;
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "phone did not answer the file request in time",
+                ))
+            }
+        }
     }
 }
+
+/// How long a single file request may wait for the phone.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Default for VfsClient {
     fn default() -> Self {

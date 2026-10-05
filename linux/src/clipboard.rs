@@ -12,7 +12,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Local clipboard changes pushed by the GUI, which learns about them from GTK's
+/// own clipboard API. When set, the watcher uses this instead of polling.
+///
+/// Polling with `wl-paste` is not an option on GNOME: without the wlroots
+/// data-control protocol, every `wl-paste` briefly maps its own window to get
+/// focus, and several of those a second keep the dock and shell extensions
+/// re-laying-out — enough to pin gnome-shell at ~90% CPU.
+pub static LOCAL_CLIPBOARD: std::sync::OnceLock<
+    tokio::sync::broadcast::Sender<LocalClipboardItem>,
+> = std::sync::OnceLock::new();
+
+/// GNOME on Wayland: no data-control protocol, so `wl-paste` can't watch the
+/// clipboard without the window-per-read workaround described above.
+fn is_gnome_wayland() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && std::env::var("XDG_CURRENT_DESKTOP")
+            .map(|d| d.to_uppercase().contains("GNOME"))
+            .unwrap_or(false)
+}
 
 /// Content item captured from the local Linux system clipboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,79 +194,147 @@ impl ClipboardManager {
         tx: mpsc::UnboundedSender<ClipboardMessage>,
     ) -> tokio::task::JoinHandle<()> {
         let mgr = self.clone();
+        if let Some(local) = LOCAL_CLIPBOARD.get() {
+            let mut changes = local.subscribe();
+            return tokio::spawn(async move {
+                info!("started Linux clipboard watcher (desktop change notifications)");
+                loop {
+                    let item = match changes.recv().await {
+                        Ok(item) => item,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
+                    if !mgr.forward_if_new(item, &tx) {
+                        break;
+                    }
+                }
+            });
+        }
+        if is_gnome_wayland() {
+            return tokio::spawn(async {
+                warn!("this computer-to-phone clipboard sync needs the HyperLink window (GNOME doesn't let background apps watch the clipboard)");
+            });
+        }
         tokio::spawn(async move {
             info!("started Linux clipboard watcher (polling interval: 300ms)");
             let mut interval = tokio::time::interval(Duration::from_millis(300));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut warned = false;
             loop {
                 interval.tick().await;
-                if let Some(item) = read_system_clipboard() {
-                    let hash = match &item {
-                        LocalClipboardItem::Text(t) => compute_content_hash(t.as_bytes()),
-                        LocalClipboardItem::Image { bytes, .. } => compute_content_hash(bytes),
-                    };
-
-                    let is_dup = {
-                        let guard = mgr.recent_hashes.lock().unwrap();
-                        guard.contains(&hash)
-                    };
-
-                    if !is_dup {
-                        let msg = mgr.create_outgoing_message(item);
-                        debug!("detected new local clipboard item (seq={})", msg.seq);
-                        if tx.send(msg).is_err() {
-                            break;
+                let item = match read_system_clipboard().await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => continue,
+                    Err(HelperTimedOut) => {
+                        // GNOME doesn't let unfocused apps read the clipboard, so
+                        // wl-paste waits for focus indefinitely. Back off instead of
+                        // piling up stuck helpers.
+                        if !warned {
+                            warn!("clipboard helper timed out; this desktop may only allow reading the clipboard while HyperLink is focused");
+                            warned = true;
                         }
+                        tokio::time::sleep(CLIPBOARD_BACKOFF).await;
+                        continue;
                     }
+                };
+                if !mgr.forward_if_new(item, &tx) {
+                    break;
                 }
             }
         })
     }
+
+    /// Sends `item` to the phone unless it's one we've just synced (in either
+    /// direction). Returns false once the outgoing channel is closed.
+    fn forward_if_new(
+        &self,
+        item: LocalClipboardItem,
+        tx: &mpsc::UnboundedSender<ClipboardMessage>,
+    ) -> bool {
+        let hash = match &item {
+            LocalClipboardItem::Text(t) => compute_content_hash(t.as_bytes()),
+            LocalClipboardItem::Image { bytes, .. } => compute_content_hash(bytes),
+        };
+        if self.recent_hashes.lock().unwrap().contains(&hash) {
+            return true;
+        }
+        let msg = self.create_outgoing_message(item);
+        debug!("detected new local clipboard item (seq={})", msg.seq);
+        tx.send(msg).is_ok()
+    }
+}
+
+/// How long a clipboard helper (wl-paste/xclip) may run before it's killed.
+const HELPER_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Pause after a helper times out before polling again.
+const CLIPBOARD_BACKOFF: Duration = Duration::from_secs(5);
+
+/// A clipboard helper didn't answer within `HELPER_TIMEOUT` (and was killed).
+#[derive(Debug)]
+pub struct HelperTimedOut;
+
+/// Runs a clipboard helper without blocking the async runtime. `Ok(None)` if it
+/// isn't installed or fails; `Err` if it hangs, in which case it's killed.
+async fn run_helper(program: &str, args: &[&str]) -> Result<Option<Vec<u8>>, HelperTimedOut> {
+    let child = match tokio::process::Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+    // On timeout the future (and with it the child) is dropped, which kills it.
+    match tokio::time::timeout(HELPER_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) if out.status.success() => Ok(Some(out.stdout)),
+        Ok(_) => Ok(None),
+        Err(_) => Err(HelperTimedOut),
+    }
 }
 
 /// Reads the current clipboard content using wl-paste (Wayland) or xclip (X11).
-pub fn read_system_clipboard() -> Option<LocalClipboardItem> {
+pub async fn read_system_clipboard() -> Result<Option<LocalClipboardItem>, HelperTimedOut> {
     // 1. Try wl-paste
-    if let Ok(types_output) = Command::new("wl-paste").arg("--list-types").output() {
-        if types_output.status.success() {
-            let types_str = String::from_utf8_lossy(&types_output.stdout);
-            // Check for image types first
-            for line in types_str.lines() {
-                let t = line.trim();
-                if t == "image/png" || t == "image/jpeg" {
-                    if let Ok(img_output) = Command::new("wl-paste").args(["--type", t]).output() {
-                        if img_output.status.success() && !img_output.stdout.is_empty() {
-                            return Some(LocalClipboardItem::Image {
-                                mime_type: t.to_string(),
-                                bytes: img_output.stdout,
-                            });
-                        }
-                    }
-                }
-            }
-            // Fallback to text
-            if let Ok(text_output) = Command::new("wl-paste").arg("--no-newline").output() {
-                if text_output.status.success() && !text_output.stdout.is_empty() {
-                    if let Ok(text) = String::from_utf8(text_output.stdout) {
-                        return Some(LocalClipboardItem::Text(text));
+    if let Some(types) = run_helper("wl-paste", &["--list-types"]).await? {
+        let types_str = String::from_utf8_lossy(&types);
+        // Check for image types first
+        for line in types_str.lines() {
+            let t = line.trim();
+            if t == "image/png" || t == "image/jpeg" {
+                if let Some(bytes) = run_helper("wl-paste", &["--type", t]).await? {
+                    if !bytes.is_empty() {
+                        return Ok(Some(LocalClipboardItem::Image {
+                            mime_type: t.to_string(),
+                            bytes,
+                        }));
                     }
                 }
             }
         }
+        // Fallback to text
+        if let Some(bytes) = run_helper("wl-paste", &["--no-newline"]).await? {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if !text.is_empty() {
+                    return Ok(Some(LocalClipboardItem::Text(text)));
+                }
+            }
+        }
+        return Ok(None);
     }
 
     // 2. Fallback to xclip
-    if let Ok(text_output) = Command::new("xclip")
-        .args(["-selection", "clipboard", "-o"])
-        .output()
-    {
-        if text_output.status.success() && !text_output.stdout.is_empty() {
-            if let Ok(text) = String::from_utf8(text_output.stdout) {
-                return Some(LocalClipboardItem::Text(text));
+    if let Some(bytes) = run_helper("xclip", &["-selection", "clipboard", "-o"]).await? {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Ok(Some(LocalClipboardItem::Text(text)));
             }
         }
     }
 
-    None
+    Ok(None)
 }
 
 /// Writes text to the OS clipboard using wl-copy (Wayland) or xclip (X11).

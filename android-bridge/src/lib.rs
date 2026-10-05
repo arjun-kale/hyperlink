@@ -42,8 +42,14 @@ pub enum ClientEvent {
     PairingPinGenerated(u32),
     /// Connection established.
     Connected,
-    /// Connection closed or failed.
+    /// Connection closed or failed. Carries a short reason code (see
+    /// `close_reason_code`) or, for failures before the connection was up, the
+    /// error text.
     Disconnected(String),
+    /// Both sides confirmed pairing; the host's identity is now trusted.
+    Paired,
+    /// The host lost a video frame and wants a keyframe to recover.
+    KeyframeRequest,
     /// Heartbeat or message received.
     MessageReceived(u8, Vec<u8>),
     /// Video stream ready to accept frames.
@@ -165,6 +171,12 @@ struct ClientState {
     config: Option<DeviceConfig>,
     config_path: Option<PathBuf>,
     pending_pairing_fp: Option<[u8; 32]>,
+    /// Pairing completes only once the user has confirmed on the phone *and*
+    /// the host has accepted (signalled by it opening its first stream), so a
+    /// host-side rejection never leaves the phone trusting a host that doesn't
+    /// trust it back.
+    pairing_user_confirmed: Option<String>,
+    pairing_host_accepted: bool,
     event_rx: Option<mpsc::UnboundedReceiver<ClientEvent>>,
     event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
     control_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
@@ -306,7 +318,22 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_connectHos
     });
 }
 
-/// Confirm pairing and persist host fingerprint.
+/// Closes the current connection, if any (the user tapped Disconnect or
+/// cancelled pairing). Reported back as a `closed_locally` disconnect.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_disconnectHost(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let state = CLIENT_STATE.lock().unwrap();
+    if let Some(conn) = state.connection.as_ref() {
+        conn.close(0u32.into(), b"user disconnected");
+    }
+}
+
+/// Records the user's confirmation of the pairing code (and the name to trust
+/// the host under). Trust is saved once the host has also accepted; see
+/// `try_finish_pairing`. Returns false if there's no pairing in progress.
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_confirmPairing(
     mut env: JNIEnv,
@@ -315,29 +342,80 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_confirmPai
 ) -> jboolean {
     let host_name: String = env.get_string(&host_name).unwrap().into();
     let mut state = CLIENT_STATE.lock().unwrap();
+    if state.pending_pairing_fp.is_none() {
+        warn!("cannot confirm pairing: no pairing in progress");
+        return 0;
+    }
+    state.pairing_user_confirmed = Some(host_name);
+    try_finish_pairing(&mut state);
+    1
+}
 
-    if let (Some(fp), Some(mut config), Some(path)) = (
+/// Persists the pending host fingerprint once both the user and the host have
+/// accepted, then reports the session as connected.
+fn try_finish_pairing(state: &mut ClientState) {
+    if !state.pairing_host_accepted {
+        return;
+    }
+    let Some(host_name) = state.pairing_user_confirmed.clone() else {
+        return;
+    };
+    let (Some(fp), Some(mut config), Some(path)) = (
         state.pending_pairing_fp.take(),
         state.config.clone(),
-        state.config_path.as_ref(),
-    ) {
-        let fp_str = crypto::fingerprint_to_string(&fp);
-        let key = config.add_trusted_peer_unique(&host_name, &fp_str);
-        info!(
-            "pairing confirmed: trusting host {:?} with fingerprint: {}",
-            key, fp_str
-        );
-        if let Err(e) = config.save(path) {
-            error!("failed to save updated config: {}", e);
-            return 0; // false
-        }
+        state.config_path.clone(),
+    ) else {
+        return;
+    };
+    state.pairing_user_confirmed = None;
+    state.pairing_host_accepted = false;
 
-        state.config = Some(config);
-        1 // true
-    } else {
-        warn!("cannot confirm pairing: no pending fingerprint or config missing");
-        0 // false
+    let fp_str = crypto::fingerprint_to_string(&fp);
+    let key = config.add_trusted_peer_unique(&host_name, &fp_str);
+    info!(
+        "pairing complete: trusting host {:?} with fingerprint: {}",
+        key, fp_str
+    );
+    if let Err(e) = config.save(&path) {
+        error!("failed to save updated config: {}", e);
+        return;
     }
+    state.config = Some(config);
+
+    // The session that paired is already live; tell the app directly. (Can't go
+    // through emit_event here: it takes the state lock we're holding.)
+    if let Some(ref tx) = state.event_tx {
+        let _ = tx.send(ClientEvent::Paired);
+        let _ = tx.send(ClientEvent::Connected);
+        let _ = tx.send(ClientEvent::VideoStreamReady);
+    }
+}
+
+/// The host opened a stream to us: during pairing, that means it accepted.
+fn note_host_accepted() {
+    let mut state = CLIENT_STATE.lock().unwrap();
+    if state.pending_pairing_fp.is_some() && !state.pairing_host_accepted {
+        state.pairing_host_accepted = true;
+        try_finish_pairing(&mut state);
+    }
+}
+
+/// Maps how the host closed the connection to a short code the app turns into
+/// user-facing copy.
+fn close_reason_code(err: &quinn::ConnectionError) -> String {
+    match err {
+        quinn::ConnectionError::ApplicationClosed(close) => match close.reason.as_ref() {
+            b"pairing rejected" => "pairing_rejected",
+            b"pairing timed out" => "pairing_timed_out",
+            b"device revoked" => "device_revoked",
+            b"pairing window closed" => "pairing_closed",
+            _ => "host_closed",
+        },
+        quinn::ConnectionError::TimedOut => "timed_out",
+        quinn::ConnectionError::LocallyClosed => "closed_locally",
+        _ => "connection_lost",
+    }
+    .to_string()
 }
 
 /// Send a payload over the control stream.
@@ -635,8 +713,13 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_pollEvent(
                     }
                     ClientEvent::Connected => "{\"type\":\"connected\"}".to_string(),
                     ClientEvent::Disconnected(reason) => {
-                        format!("{{\"type\":\"disconnected\",\"reason\":\"{}\"}}", reason)
+                        format!(
+                            "{{\"type\":\"disconnected\",\"reason\":\"{}\"}}",
+                            json_escape(&reason)
+                        )
                     }
+                    ClientEvent::Paired => "{\"type\":\"paired\"}".to_string(),
+                    ClientEvent::KeyframeRequest => "{\"type\":\"keyframe_request\"}".to_string(),
                     ClientEvent::MessageReceived(msg_type, payload) => {
                         format!(
                             "{{\"type\":\"message\",\"message_type\":{},\"payload_len\":{}}}",
@@ -854,6 +937,8 @@ async fn run_connection_task(
             {
                 let mut state = CLIENT_STATE.lock().unwrap();
                 state.pending_pairing_fp = Some(fp);
+                state.pairing_user_confirmed = None;
+                state.pairing_host_accepted = false;
             }
             // Generate symmetric PIN.
             let our_cert_der = rustls_pemfile::certs(&mut config.cert_pem.as_bytes())
@@ -1078,6 +1163,7 @@ async fn run_connection_task(
     let conn_clone = connection.clone();
     let input_task = tokio::spawn(async move {
         while let Ok((mut send_stream, mut recv_stream)) = conn_clone.accept_bi().await {
+            note_host_accepted();
             let mut stream_type_buf = [0u8; 1];
             if recv_stream.read_exact(&mut stream_type_buf).await.is_err() {
                 continue;
@@ -1085,140 +1171,149 @@ async fn run_connection_task(
             let stream_type = stream_type_buf[0];
             if stream_type == 0x40 {
                 info!("accepted input stream 0x40 from host");
-                let mut buf = vec![0u8; 1024];
-                let mut ack_packet = Vec::with_capacity(
-                    hyperlink_protocol::version::HEADER_SIZE
-                        + hyperlink_protocol::input::INPUT_ACK_SIZE,
-                );
-                let mut seq: u32 = 0;
+                // Its own task: handling it inline would keep this loop from
+                // accepting the host's other streams (clipboard, files) for as
+                // long as the input stream stays open, i.e. forever.
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 1024];
+                    let mut ack_packet = Vec::with_capacity(
+                        hyperlink_protocol::version::HEADER_SIZE
+                            + hyperlink_protocol::input::INPUT_ACK_SIZE,
+                    );
+                    let mut seq: u32 = 0;
 
-                loop {
-                    let mut hdr_bytes = [0u8; hyperlink_protocol::version::HEADER_SIZE];
-                    if recv_stream.read_exact(&mut hdr_bytes).await.is_err() {
-                        break;
-                    }
-                    if let Ok(header) = hyperlink_protocol::version::Header::decode(&hdr_bytes) {
-                        let payload_len = header.payload_len as usize;
-                        if payload_len > buf.len() {
-                            buf.resize(payload_len, 0);
-                        }
-                        if recv_stream
-                            .read_exact(&mut buf[..payload_len])
-                            .await
-                            .is_err()
-                        {
+                    loop {
+                        let mut hdr_bytes = [0u8; hyperlink_protocol::version::HEADER_SIZE];
+                        if recv_stream.read_exact(&mut hdr_bytes).await.is_err() {
                             break;
                         }
+                        if let Ok(header) = hyperlink_protocol::version::Header::decode(&hdr_bytes)
+                        {
+                            let payload_len = header.payload_len as usize;
+                            if payload_len > buf.len() {
+                                buf.resize(payload_len, 0);
+                            }
+                            if recv_stream
+                                .read_exact(&mut buf[..payload_len])
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
 
-                        match header.message_type {
-                            hyperlink_protocol::message::MessageType::PointerEvent => {
-                                if let Ok(p) = hyperlink_protocol::input::PointerEvent::decode(
-                                    &buf[..payload_len],
-                                ) {
-                                    emit_event(ClientEvent::PointerEvent {
-                                        action: p.action as u8,
-                                        button: p.button as u8,
-                                        x_norm: p.x_norm,
-                                        y_norm: p.y_norm,
-                                        pressure: p.pressure,
-                                    });
-                                }
-                            }
-                            hyperlink_protocol::message::MessageType::KeyEvent => {
-                                if let Ok(k) =
-                                    hyperlink_protocol::input::KeyEvent::decode(&buf[..payload_len])
-                                {
-                                    emit_event(ClientEvent::KeyEvent {
-                                        action: k.action as u8,
-                                        keycode: k.keycode,
-                                        modifiers: k.modifiers,
-                                    });
-                                }
-                            }
-                            hyperlink_protocol::message::MessageType::ScrollEvent => {
-                                if let Ok(s) = hyperlink_protocol::input::ScrollEvent::decode(
-                                    &buf[..payload_len],
-                                ) {
-                                    emit_event(ClientEvent::ScrollEvent {
-                                        dx: s.dx,
-                                        dy: s.dy,
-                                        x_norm: s.x_norm,
-                                        y_norm: s.y_norm,
-                                    });
-                                }
-                            }
-                            hyperlink_protocol::message::MessageType::NavEvent => {
-                                if let Ok(n) =
-                                    hyperlink_protocol::input::NavEvent::decode(&buf[..payload_len])
-                                {
-                                    emit_event(ClientEvent::NavEvent {
-                                        action: n.action as u8,
-                                    });
-                                }
-                            }
-                            hyperlink_protocol::message::MessageType::NotificationActionInvoke => {
-                                if let Ok(invoke) =
-                                    hyperlink_protocol::notification::NotificationActionInvoke::decode(
+                            match header.message_type {
+                                hyperlink_protocol::message::MessageType::PointerEvent => {
+                                    if let Ok(p) = hyperlink_protocol::input::PointerEvent::decode(
                                         &buf[..payload_len],
-                                    )
-                                {
-                                    emit_event(ClientEvent::NotificationActionInvoke {
-                                        key: invoke.id,
-                                        action_id: invoke.action_id,
-                                    });
+                                    ) {
+                                        emit_event(ClientEvent::PointerEvent {
+                                            action: p.action as u8,
+                                            button: p.button as u8,
+                                            x_norm: p.x_norm,
+                                            y_norm: p.y_norm,
+                                            pressure: p.pressure,
+                                        });
+                                    }
                                 }
-                            }
-                            hyperlink_protocol::message::MessageType::NotificationDismiss => {
-                                if let Ok(dismiss) =
-                                    hyperlink_protocol::notification::NotificationDismiss::decode(
+                                hyperlink_protocol::message::MessageType::KeyEvent => {
+                                    if let Ok(k) =
+                                        hyperlink_protocol::input::KeyEvent::decode(&buf[..payload_len])
+                                    {
+                                        emit_event(ClientEvent::KeyEvent {
+                                            action: k.action as u8,
+                                            keycode: k.keycode,
+                                            modifiers: k.modifiers,
+                                        });
+                                    }
+                                }
+                                hyperlink_protocol::message::MessageType::ScrollEvent => {
+                                    if let Ok(s) = hyperlink_protocol::input::ScrollEvent::decode(
                                         &buf[..payload_len],
-                                    )
-                                {
-                                    emit_event(ClientEvent::NotificationDismiss {
-                                        key: dismiss.id,
-                                    });
+                                    ) {
+                                        emit_event(ClientEvent::ScrollEvent {
+                                            dx: s.dx,
+                                            dy: s.dy,
+                                            x_norm: s.x_norm,
+                                            y_norm: s.y_norm,
+                                        });
+                                    }
                                 }
-                            }
-                            hyperlink_protocol::message::MessageType::DndSync => {
-                                if let Ok(dnd) =
-                                    hyperlink_protocol::notification::DndSync::decode(
-                                        &buf[..payload_len],
-                                    )
-                                {
-                                    emit_event(ClientEvent::DndSync {
-                                        enabled: dnd.dnd_enabled,
-                                    });
+                                hyperlink_protocol::message::MessageType::KeyframeRequest => {
+                                    emit_event(ClientEvent::KeyframeRequest);
                                 }
+                                hyperlink_protocol::message::MessageType::NavEvent => {
+                                    if let Ok(n) =
+                                        hyperlink_protocol::input::NavEvent::decode(&buf[..payload_len])
+                                    {
+                                        emit_event(ClientEvent::NavEvent {
+                                            action: n.action as u8,
+                                        });
+                                    }
+                                }
+                                hyperlink_protocol::message::MessageType::NotificationActionInvoke => {
+                                    if let Ok(invoke) =
+                                        hyperlink_protocol::notification::NotificationActionInvoke::decode(
+                                            &buf[..payload_len],
+                                        )
+                                    {
+                                        emit_event(ClientEvent::NotificationActionInvoke {
+                                            key: invoke.id,
+                                            action_id: invoke.action_id,
+                                        });
+                                    }
+                                }
+                                hyperlink_protocol::message::MessageType::NotificationDismiss => {
+                                    if let Ok(dismiss) =
+                                        hyperlink_protocol::notification::NotificationDismiss::decode(
+                                            &buf[..payload_len],
+                                        )
+                                    {
+                                        emit_event(ClientEvent::NotificationDismiss {
+                                            key: dismiss.id,
+                                        });
+                                    }
+                                }
+                                hyperlink_protocol::message::MessageType::DndSync => {
+                                    if let Ok(dnd) =
+                                        hyperlink_protocol::notification::DndSync::decode(
+                                            &buf[..payload_len],
+                                        )
+                                    {
+                                        emit_event(ClientEvent::DndSync {
+                                            enabled: dnd.dnd_enabled,
+                                        });
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
-                        }
 
-                        // Send back InputAck for RTT measurement
-                        seq = seq.wrapping_add(1);
-                        let now_us = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_micros() as u64)
-                            .unwrap_or(0);
-                        let ack = hyperlink_protocol::input::InputAck {
-                            seq,
-                            timestamp_us: now_us,
-                        };
-                        let mut ack_payload = Vec::new();
-                        if ack.encode(&mut ack_payload).is_ok() {
-                            let ack_header = hyperlink_protocol::version::Header::new(
-                                hyperlink_protocol::message::MessageType::InputAck,
-                                ack_payload.len() as u32,
-                            );
-                            ack_packet.clear();
-                            if ack_header.encode(&mut ack_packet).is_ok() {
-                                ack_packet.extend_from_slice(&ack_payload);
-                                if send_stream.write_all(&ack_packet).await.is_err() {
-                                    break;
+                            // Send back InputAck for RTT measurement
+                            seq = seq.wrapping_add(1);
+                            let now_us = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_micros() as u64)
+                                .unwrap_or(0);
+                            let ack = hyperlink_protocol::input::InputAck {
+                                seq,
+                                timestamp_us: now_us,
+                            };
+                            let mut ack_payload = Vec::new();
+                            if ack.encode(&mut ack_payload).is_ok() {
+                                let ack_header = hyperlink_protocol::version::Header::new(
+                                    hyperlink_protocol::message::MessageType::InputAck,
+                                    ack_payload.len() as u32,
+                                );
+                                ack_packet.clear();
+                                if ack_header.encode(&mut ack_packet).is_ok() {
+                                    ack_packet.extend_from_slice(&ack_payload);
+                                    if send_stream.write_all(&ack_packet).await.is_err() {
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
-                }
+                });
             } else if stream_type == 0x70 {
                 info!("accepted dedicated clipboard stream 0x70 from host");
                 tokio::spawn(async move {
@@ -1425,16 +1520,24 @@ async fn run_connection_task(
     });
 
     // Wait until connection closes or tasks finish.
-    tokio::select! {
-        _ = connection.closed() => {
-            info!("QUIC connection closed by peer");
+    let reason = tokio::select! {
+        err = connection.closed() => {
+            info!("QUIC connection closed: {}", err);
+            close_reason_code(&err)
         }
-        _ = write_task => {}
-        _ = read_task => {}
-        _ = input_task => {}
-    }
+        _ = write_task => "connection_lost".to_string(),
+        _ = read_task => "connection_lost".to_string(),
+        _ = input_task => "connection_lost".to_string(),
+    };
 
-    emit_event(ClientEvent::Disconnected("Connection closed".to_string()));
+    // A pairing that didn't finish leaves nothing behind.
+    {
+        let mut state = CLIENT_STATE.lock().unwrap();
+        state.pending_pairing_fp = None;
+        state.pairing_user_confirmed = None;
+        state.pairing_host_accepted = false;
+    }
+    emit_event(ClientEvent::Disconnected(reason));
 
     // Reset control channel.
     {

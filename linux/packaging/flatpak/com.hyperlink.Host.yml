@@ -18,8 +18,8 @@
 #   3. Only once that succeeds should this be pointed at a real Flathub (or
 #      other) submission — this manifest has not been through that process.
 #
-# GNOME 46 runtime ships libadwaita 1.5+ / GTK 4.14+, both newer than the
-# `v4_8`/`v1_2` binding feature floors pinned in linux/Cargo.toml.
+# GNOME 46 runtime ships libadwaita 1.5 / GTK 4.14, which meet the
+# `v4_12`/`v1_5` binding feature floors pinned in linux/Cargo.toml.
 
 app-id: com.hyperlink.Host
 runtime: org.gnome.Platform
@@ -60,10 +60,14 @@ modules:
     build-commands:
       - cargo --offline build --release -p hyperlink-linux --features video
       - install -Dm755 target/release/hyperlink-linux /app/bin/hyperlink-linux
-      - install -Dm644 packaging/flatpak/com.hyperlink.Host.desktop
+      - install -Dm644 linux/packaging/flatpak/com.hyperlink.Host.desktop
         /app/share/applications/com.hyperlink.Host.desktop
-      - install -Dm644 packaging/flatpak/com.hyperlink.Host.appdata.xml
+      - install -Dm644 linux/packaging/flatpak/com.hyperlink.Host.appdata.xml
         /app/share/metainfo/com.hyperlink.Host.appdata.xml
+      - install -Dm644 linux/data/icons/hicolor/scalable/apps/com.hyperlink.Host.svg
+        /app/share/icons/hicolor/scalable/apps/com.hyperlink.Host.svg
+      - install -Dm644 linux/data/icons/hicolor/symbolic/apps/com.hyperlink.Host-symbolic.svg
+        /app/share/icons/hicolor/symbolic/apps/com.hyperlink.Host-symbolic.svg
     sources:
       - type: dir
         path: ../../..

@@ -2,14 +2,10 @@
 
 //! Libadwaita preferences window (Phase 11).
 //!
-//! Reads and writes `DeviceConfig` directly against `config_path` on disk —
-//! it does not share live state with an already-running connection. That's a
-//! deliberate, disclosed limitation rather than an oversight: feature
-//! toggles and the bandwidth cap apply to the *next* session, and revoking a
-//! trusted device here does not forcibly disconnect a peer that is already
-//! connected using the in-memory trust set the connection handler loaded at
-//! startup — both of those are called out in the UI copy below rather than
-//! silently assumed to be live.
+//! Reads and writes `DeviceConfig` directly against `config_path` on disk.
+//! Feature toggles and the bandwidth cap apply to the *next* session, which
+//! the UI copy says. Removing a device is live: it also leaves the server's
+//! in-memory trust set and drops the phone's session if one is up.
 
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
@@ -21,7 +17,12 @@ use tracing::{error, info};
 use hyperlink_protocol::config::{DeviceConfig, HostPreferences};
 
 /// Builds and presents the preferences window on top of `parent`.
-pub fn show_preferences_window(parent: &ApplicationWindow, config_path: PathBuf) {
+/// `on_devices_changed` runs after a device is removed.
+pub fn show_preferences_window(
+    parent: &ApplicationWindow,
+    config_path: PathBuf,
+    on_devices_changed: impl Fn() + 'static,
+) {
     let config = match DeviceConfig::load_or_create(&config_path, "HyperLink-Host") {
         Ok(c) => Arc::new(Mutex::new(c)),
         Err(e) => {
@@ -41,7 +42,12 @@ pub fn show_preferences_window(parent: &ApplicationWindow, config_path: PathBuf)
     window.add(&build_features_page(&config, &config_path));
     window.add(&build_bandwidth_page(&config, &config_path));
     window.add(&build_privacy_page(&config, &config_path));
-    window.add(&build_devices_page(&config, &config_path, &window));
+    window.add(&build_devices_page(
+        &config,
+        &config_path,
+        &window,
+        std::rc::Rc::new(on_devices_changed),
+    ));
 
     window.present();
 }
@@ -100,15 +106,17 @@ fn build_features_page(
         .icon_name("preferences-system-symbolic")
         .build();
 
+    page.add(&build_computer_group(config, config_path));
+
     let group = adw::PreferencesGroup::builder()
-        .title("Enabled Features")
-        .description("Applies to the next session — an already-active mirror keeps running with the settings it started with.")
+        .title("What Your Phone Can Do Here")
+        .description("Changes apply the next time your phone connects.")
         .build();
 
     add_feature_switch(
         &group,
-        "Video Mirroring",
-        "Mirror the phone's screen to this window",
+        "Phone Screen",
+        "Show your phone's screen in a window on this computer",
         config,
         config_path,
         |p| p.enable_video,
@@ -116,8 +124,8 @@ fn build_features_page(
     );
     add_feature_switch(
         &group,
-        "Input Injection",
-        "Send keyboard, mouse, and touch input to the phone",
+        "Control From This Computer",
+        "Use your mouse and keyboard on the phone's screen",
         config,
         config_path,
         |p| p.enable_input,
@@ -126,7 +134,7 @@ fn build_features_page(
     add_feature_switch(
         &group,
         "Notifications",
-        "Mirror phone notifications to the desktop",
+        "Show your phone's notifications on this computer",
         config,
         config_path,
         |p| p.enable_notifications,
@@ -134,8 +142,8 @@ fn build_features_page(
     );
     add_feature_switch(
         &group,
-        "Clipboard Sync",
-        "Share the system clipboard in both directions",
+        "Shared Clipboard",
+        "Copy on one device, paste on the other",
         config,
         config_path,
         |p| p.enable_clipboard,
@@ -143,15 +151,15 @@ fn build_features_page(
     );
     add_feature_switch(
         &group,
-        "File Access",
-        "Mount the phone's storage as a local virtual filesystem",
+        "Phone Files",
+        "Browse your phone's storage from your file manager",
         config,
         config_path,
         |p| p.enable_file_access,
         |p, v| p.enable_file_access = v,
     );
     add_feature_switch(
-        &group, "Proximity Pre-Warm", "Opportunistically pre-warm reconnects — never bypasses certificate authentication (see docs/SECURITY_REVIEW.md)",
+        &group, "Faster Reconnect When Nearby", "Get ready to connect when your phone comes close. Your phone still has to prove it's yours",
         config, config_path,
         |p| p.enable_proximity_prewarm, |p, v| p.enable_proximity_prewarm = v,
     );
@@ -170,13 +178,13 @@ fn build_bandwidth_page(
         .build();
 
     let group = adw::PreferencesGroup::builder()
-        .title("Video Bitrate")
-        .description("Caps the encoder's target bitrate for the next mirroring session.")
+        .title("Screen Quality")
+        .description("Lower this if the phone's screen stutters on slow Wi-Fi. Applies the next time screen sharing starts.")
         .build();
 
     let row = adw::ActionRow::builder()
-        .title("Max Bitrate")
-        .subtitle("0 = unlimited (encoder default)")
+        .title("Maximum Bitrate (kbps)")
+        .subtitle("0 means no limit")
         .build();
 
     let current_kbps = config
@@ -220,13 +228,13 @@ fn build_privacy_page(
     // --- Crash reports ---
     let crash_group = adw::PreferencesGroup::builder()
         .title("Crash Reports")
-        .description("Written only to this computer's disk, never transmitted anywhere. Contains a panic message, code location, and optional backtrace — never clipboard text, notification content, file names, or key material. See docs/SECURITY_REVIEW.md.")
+        .description("Saved only on this computer and never sent anywhere. Reports never include clipboard text, notification content, file names or keys.")
         .build();
 
     add_feature_switch(
         &crash_group,
-        "Save Local Crash Reports",
-        "Write a redacted report to ~/.local/share/hyperlink/crash_reports on a crash",
+        "Save Crash Reports",
+        "Helps diagnose problems if HyperLink stops unexpectedly",
         config,
         config_path,
         |p| p.crash_reporting_enabled,
@@ -282,7 +290,7 @@ fn build_privacy_page(
     // --- Updates ---
     let update_group = adw::PreferencesGroup::builder()
         .title("Updates")
-        .description("Checks a version feed and notifies you — never downloads or installs anything automatically. Update through your normal channel (Flatpak, package manager, or git pull + cargo build).")
+        .description("HyperLink tells you when a new version is out. It never downloads or installs anything by itself.")
         .build();
 
     add_feature_switch(
@@ -313,7 +321,10 @@ fn build_privacy_page(
                     format!("{} (update available: {latest})", result.current_version)
                 }
                 (Some(_), false) => format!("{} (up to date)", result.current_version),
-                (None, _) => format!("{} (check failed — offline?)", result.current_version),
+                (None, _) => format!(
+                    "{} (couldn't check — are you offline?)",
+                    result.current_version
+                ),
             };
             row.set_subtitle(&text);
             btn_clone.set_sensitive(true);
@@ -330,15 +341,18 @@ fn build_devices_page(
     config: &Arc<Mutex<DeviceConfig>>,
     config_path: &Path,
     window: &adw::PreferencesWindow,
+    on_devices_changed: std::rc::Rc<dyn Fn()>,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
-        .title("Trusted Devices")
-        .icon_name("network-transmit-receive-symbolic")
+        .title("Paired Phones")
+        .icon_name("phone-symbolic")
         .build();
 
     let group = adw::PreferencesGroup::builder()
-        .title("Paired Devices")
-        .description("Removing a device here stops it from pairing again automatically, but does not disconnect a session already in progress — restart HyperLink to force-drop an active connection.")
+        .title("Paired Phones")
+        .description(
+            "Removing a phone disconnects it right away. It has to be paired again to reconnect.",
+        )
         .build();
 
     let peers: Vec<(String, String)> = config
@@ -349,40 +363,70 @@ fn build_devices_page(
         .map(|(name, fp)| (name.clone(), fp.clone()))
         .collect();
 
-    if peers.is_empty() {
-        let empty_row = adw::ActionRow::builder()
-            .title("No paired devices yet")
-            .subtitle("Run with --pair to pair a new phone")
-            .build();
-        group.add(&empty_row);
-    }
+    let empty_row = adw::ActionRow::builder()
+        .title("No paired phones yet")
+        .subtitle("Use “Pair a New Phone” in the main menu")
+        .build();
+    group.add(&empty_row);
+    empty_row.set_visible(peers.is_empty());
 
     for (name, fingerprint) in peers {
+        let short_fp: String = fingerprint.chars().take(11).collect();
         let row = adw::ActionRow::builder()
             .title(&name)
-            .subtitle(&fingerprint)
+            .subtitle(format!("Security fingerprint {short_fp}…"))
             .build();
+        row.add_prefix(&gtk4::Image::from_icon_name("phone-symbolic"));
 
-        let remove_btn = gtk4::Button::from_icon_name("user-trash-symbolic");
-        remove_btn.add_css_class("flat");
-        remove_btn.set_valign(gtk4::Align::Center);
-        remove_btn.set_tooltip_text(Some("Revoke trust for this device"));
+        let remove_btn = gtk4::Button::builder()
+            .label("Remove")
+            .valign(gtk4::Align::Center)
+            .css_classes(["flat", "destructive-action"])
+            .build();
 
         let config_clone = config.clone();
         let config_path_clone = config_path.to_path_buf();
-        let name_clone = name.clone();
         let window_clone = window.clone();
         let row_clone = row.clone();
         let group_clone = group.clone();
+        let empty_clone = empty_row.clone();
+        let changed = on_devices_changed.clone();
         remove_btn.connect_clicked(move |_| {
-            {
-                let mut guard = config_clone.lock().unwrap();
-                guard.remove_trusted_peer(&name_clone);
-            }
-            save(&config_clone, &config_path_clone);
-            group_clone.remove(&row_clone);
-            info!(peer = %name_clone, "revoked trusted peer via preferences window");
-            let _ = &window_clone;
+            let dialog = adw::AlertDialog::builder()
+                .heading(format!("Remove “{name}”?"))
+                .body("It will be disconnected now and won't be able to connect until you pair it again.")
+                .close_response("cancel")
+                .default_response("cancel")
+                .build();
+            dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
+            dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+
+            let config_clone = config_clone.clone();
+            let config_path_clone = config_path_clone.clone();
+            let name = name.clone();
+            let fingerprint = fingerprint.clone();
+            let row_clone = row_clone.clone();
+            let group_clone = group_clone.clone();
+            let empty_clone = empty_clone.clone();
+            let changed = changed.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response != "remove" {
+                    return;
+                }
+                let now_empty = {
+                    let mut guard = config_clone.lock().unwrap();
+                    guard.remove_trusted_peer(&name);
+                    crate::refresh_proximity_trust(&guard.trusted_peers);
+                    guard.trusted_peers.is_empty()
+                };
+                save(&config_clone, &config_path_clone);
+                crate::connection::revoke_device(&fingerprint);
+                group_clone.remove(&row_clone);
+                empty_clone.set_visible(now_empty);
+                info!(peer = %name, "removed paired phone via preferences window");
+                changed();
+            });
+            dialog.present(Some(&window_clone));
         });
 
         row.add_suffix(&remove_btn);
@@ -391,4 +435,83 @@ fn build_devices_page(
 
     page.add(&group);
     page
+}
+
+/// Name phones see, and whether HyperLink starts with the session.
+fn build_computer_group(
+    config: &Arc<Mutex<DeviceConfig>>,
+    config_path: &Path,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("This Computer")
+        .build();
+
+    let name_row = adw::EntryRow::builder()
+        .title("Name shown on your phone")
+        .text(config.lock().unwrap().device_name.as_str())
+        .show_apply_button(true)
+        .build();
+    let config_clone = config.clone();
+    let config_path_clone = config_path.to_path_buf();
+    name_row.connect_apply(move |row| {
+        let name = row.text().trim().to_string();
+        if name.is_empty() {
+            row.set_text(&config_clone.lock().unwrap().device_name);
+            return;
+        }
+        config_clone.lock().unwrap().device_name = name;
+        save(&config_clone, &config_path_clone);
+    });
+    group.add(&name_row);
+    group.set_description(Some(
+        "A new name appears on your phone the next time HyperLink starts.",
+    ));
+
+    // Autostart via an XDG autostart entry. Inside Flatpak this needs the
+    // Background portal instead, so the switch isn't offered there.
+    if std::env::var_os("FLATPAK_ID").is_none() {
+        let row = adw::SwitchRow::builder()
+            .title("Start When You Log In")
+            .subtitle("Keeps your phone linked without opening HyperLink first")
+            .active(autostart_path().is_file())
+            .build();
+        row.connect_active_notify(|row| {
+            if let Err(e) = set_autostart(row.is_active()) {
+                error!(error = %e, "failed to change autostart");
+            }
+        });
+        group.add(&row);
+    }
+
+    group
+}
+
+fn autostart_path() -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
+        });
+    config_home.join("autostart/com.hyperlink.Host.desktop")
+}
+
+fn set_autostart(enabled: bool) -> std::io::Result<()> {
+    let path = autostart_path();
+    if !enabled {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let exe = std::env::current_exe()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(
+        &path,
+        format!(
+            "[Desktop Entry]\nType=Application\nName=HyperLink\nExec=\"{}\" --background\nIcon=com.hyperlink.Host\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n",
+            exe.display()
+        ),
+    )
 }

@@ -1,21 +1,25 @@
 #![cfg(feature = "video")]
 
-//! Libadwaita video display window for Phase 2 screen mirroring and Phase 3 input capture.
+//! The mirrored phone screen (Phase 2) and input capture (Phase 3).
 //!
-//! Creates a GTK4 application window with a `Picture` widget that renders
-//! the decoded video from the GStreamer pipeline's paintable sink, and captures
-//! pointer, keyboard, scroll, and navigation events normalized for Android injection.
+//! Builds the mirror view shown inside the main window: the phone's screen on
+//! a dim stage, a floating glass dock with the phone's navigation keys, and
+//! the pointer/scroll/keyboard controllers that turn desktop input into
+//! normalized Android input events.
+
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use gtk4::glib::translate::IntoGlib;
+use gtk4::prelude::*;
 use gtk4::{
-    self, gdk, Application, EventControllerKey, EventControllerMotion, EventControllerScroll,
+    gdk, EventControllerKey, EventControllerMotion, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, Picture,
 };
-use libadwaita::prelude::*;
-use libadwaita::{self as adw, ApplicationWindow, HeaderBar};
-use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::info;
+use libadwaita as adw;
 
+use crate::glass::{AmbientStage, GlassPanel};
 use hyperlink_protocol::input::{
     key_modifiers, KeyAction, KeyEvent, NavAction, NavEvent, PointerAction, PointerButton,
     PointerEvent, ScrollEvent,
@@ -33,11 +37,14 @@ pub fn set_dnd_button_state(btn: &gtk4::ToggleButton, enabled: bool) {
     }
 }
 
-pub fn set_video_dimensions(width: u32, height: u32) {
-    if width > 0 && height > 0 {
-        VIDEO_WIDTH.store(width, Ordering::Relaxed);
-        VIDEO_HEIGHT.store(height, Ordering::Relaxed);
+/// Records the phone's current frame size. Returns true if it changed.
+pub fn set_video_dimensions(width: u32, height: u32) -> bool {
+    if width == 0 || height == 0 {
+        return false;
     }
+    let old_w = VIDEO_WIDTH.swap(width, Ordering::Relaxed);
+    let old_h = VIDEO_HEIGHT.swap(height, Ordering::Relaxed);
+    old_w != width || old_h != height
 }
 
 pub fn get_video_dimensions() -> (f64, f64) {
@@ -88,448 +95,428 @@ pub fn normalize_coordinates(
     ))
 }
 
-/// Creates and displays the video mirroring window.
-///
-/// `paintable` is obtained from `VideoPipeline::paintable()`.
-/// Returns the window handle and toast overlay for notification toasts.
-pub fn create_video_window(
-    app: &Application,
-    paintable: &gdk::Paintable,
-    config_path: std::path::PathBuf,
-) -> (ApplicationWindow, adw::ToastOverlay, gtk4::ToggleButton) {
-    // Initialize libadwaita.
-    adw::init().expect("failed to initialize libadwaita");
+fn send(msg: crate::InputGuiMessage) {
+    if let Some(tx) = crate::INPUT_SENDER.get() {
+        let _ = tx.try_send(msg);
+    }
+}
 
-    // Build the picture widget displaying the video paintable.
+fn send_nav(action: NavAction) {
+    send(crate::InputGuiMessage::Nav(NavEvent {
+        action,
+        timestamp_us: now_us(),
+    }));
+}
+
+/// The mirror view and the handles the app updates while a stream is live.
+pub struct MirrorView {
+    pub root: gtk4::Widget,
+    pub frame: gtk4::AspectFrame,
+    pub stats_panel: GlassPanel,
+    pub stats_label: gtk4::Label,
+    pub paused_panel: GlassPanel,
+    pub dnd_button: gtk4::ToggleButton,
+}
+
+impl MirrorView {
+    /// Matches the phone frame to the stream's aspect ratio, so the rounded
+    /// corners sit on the video rather than on letterbox padding.
+    pub fn set_aspect(&self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.frame.set_ratio(width as f32 / height as f32);
+        }
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.paused_panel.set_visible(paused);
+    }
+
+    pub fn set_stats(&self, fps: f64, bitrate_kbps: u32) {
+        self.stats_label.set_label(&format!(
+            "{fps:.0} fps · {:.1} Mbps",
+            bitrate_kbps as f64 / 1000.0
+        ));
+    }
+}
+
+fn dock_button(icon: &str, tooltip: &str, action: NavAction) -> gtk4::Button {
+    let button = gtk4::Button::builder()
+        .icon_name(icon)
+        .tooltip_text(tooltip)
+        .css_classes(["hl-dock-button"])
+        .build();
+    button.update_property(&[gtk4::accessible::Property::Label(tooltip)]);
+    button.connect_clicked(move |_| send_nav(action));
+    button
+}
+
+fn dock_separator() -> gtk4::Widget {
+    gtk4::Box::builder()
+        .css_classes(["hl-dock-separator"])
+        .build()
+        .upcast()
+}
+
+/// Builds the mirror view around the decoded video `paintable`.
+pub fn build_mirror_view(paintable: &gdk::Paintable) -> MirrorView {
     let picture = Picture::builder()
         .paintable(paintable)
         .hexpand(true)
         .vexpand(true)
         .content_fit(gtk4::ContentFit::Contain)
+        .can_shrink(true)
+        .css_classes(["hl-phone"])
+        .overflow(gtk4::Overflow::Hidden)
+        .build();
+    picture.update_property(&[gtk4::accessible::Property::Label(
+        "Your phone's screen. Click to tap, scroll to swipe, type to enter text.",
+    )]);
+    attach_pointer_controllers(&picture);
+
+    let (w, h) = get_video_dimensions();
+    let frame = gtk4::AspectFrame::builder()
+        .ratio((w / h) as f32)
+        .obey_child(false)
+        .child(&picture)
+        .margin_top(24)
+        .margin_bottom(104) // room for the dock, so it never covers the screen's bottom edge
+        .margin_start(24)
+        .margin_end(24)
         .build();
 
-    // 1. GestureClick controller on the video picture widget (clicks/taps)
-    let gesture_click = GestureClick::new();
-    gesture_click.set_button(0); // Listen to all mouse buttons
-    let pic_clone1 = picture.clone();
-    gesture_click.connect_pressed(move |gesture, _, x, y| {
-        let button = match gesture.current_button() {
-            1 => PointerButton::Primary,
-            2 => PointerButton::Middle,
-            3 => PointerButton::Secondary,
-            _ => PointerButton::Primary,
-        };
-
-        // Right-click maps directly to Android Back button navigation
-        if button == PointerButton::Secondary {
-            if let Some(tx) = crate::INPUT_SENDER.get() {
-                let _ = tx.try_send(crate::InputGuiMessage::Nav(NavEvent {
-                    action: NavAction::Back,
-                    timestamp_us: now_us(),
-                }));
-            }
+    // ── Dock ──
+    let dnd_button = gtk4::ToggleButton::builder()
+        .icon_name("notifications-disabled-symbolic")
+        .tooltip_text("Do Not Disturb on phone and computer")
+        .css_classes(["hl-dock-button"])
+        .build();
+    dnd_button.update_property(&[gtk4::accessible::Property::Label("Do Not Disturb")]);
+    dnd_button.connect_toggled(|btn| {
+        if UPDATING_DND_UI.load(Ordering::Relaxed) {
             return;
         }
-
-        let w = pic_clone1.width() as f64;
-        let h = pic_clone1.height() as f64;
-        if let Some((x_norm, y_norm)) = normalize_coordinates(w, h, x, y) {
-            if let Some(tx) = crate::INPUT_SENDER.get() {
-                let _ = tx.try_send(crate::InputGuiMessage::Pointer(PointerEvent {
-                    action: PointerAction::Down,
-                    button,
-                    x_norm,
-                    y_norm,
-                    pressure: 128,
-                    timestamp_us: now_us(),
-                }));
-            }
-        }
+        let active = btn.is_active();
+        crate::set_global_dnd_active(active);
+        send(crate::InputGuiMessage::Dnd(
+            hyperlink_protocol::notification::DndSync {
+                dnd_enabled: active,
+            },
+        ));
     });
 
-    let pic_clone2 = picture.clone();
+    let dock_row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(2)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+    dock_row.append(&dock_button(
+        "go-previous-symbolic",
+        "Back  (Esc or right-click)",
+        NavAction::Back,
+    ));
+    dock_row.append(&dock_button(
+        "go-home-symbolic",
+        "Home  (Super)",
+        NavAction::Home,
+    ));
+    dock_row.append(&dock_button(
+        "view-app-grid-symbolic",
+        "Recent apps",
+        NavAction::Recents,
+    ));
+    dock_row.append(&dock_separator());
+    dock_row.append(&dock_button(
+        "audio-volume-low-symbolic",
+        "Volume down",
+        NavAction::VolumeDown,
+    ));
+    dock_row.append(&dock_button(
+        "audio-volume-high-symbolic",
+        "Volume up",
+        NavAction::VolumeUp,
+    ));
+    dock_row.append(&dock_separator());
+    dock_row.append(&dnd_button);
+
+    let overlay = gtk4::Overlay::builder().child(&frame).build();
+    let stage = AmbientStage::new(&picture, &overlay);
+
+    let dock = GlassPanel::new(&picture, &stage, &dock_row, 22.0);
+    dock.set_halign(gtk4::Align::Center);
+    dock.set_valign(gtk4::Align::End);
+    dock.set_margin_bottom(28);
+
+    // ── Stream stats (hidden until asked for) ──
+    let stats_label = gtk4::Label::builder()
+        .label("Waiting for video…")
+        .css_classes(["caption", "hl-stats"])
+        .build();
+    let stats_panel = GlassPanel::new(&picture, &stage, &stats_label, 14.0);
+    stats_panel.set_halign(gtk4::Align::End);
+    stats_panel.set_valign(gtk4::Align::Start);
+    stats_panel.set_margin_top(16);
+    stats_panel.set_margin_end(16);
+    stats_panel.set_visible(false);
+
+    // ── Paused state ──
+    let paused_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(20)
+        .margin_bottom(20)
+        .margin_start(28)
+        .margin_end(28)
+        .build();
+    paused_box.append(
+        &gtk4::Image::builder()
+            .icon_name("media-playback-pause-symbolic")
+            .pixel_size(32)
+            .margin_bottom(6)
+            .build(),
+    );
+    paused_box.append(
+        &gtk4::Label::builder()
+            .label("Screen sharing paused")
+            .css_classes(["heading"])
+            .build(),
+    );
+    paused_box.append(
+        &gtk4::Label::builder()
+            .label("Your phone stopped sending its screen.\nTap “Show screen on PC” on your phone to resume.")
+            .justify(gtk4::Justification::Center)
+            .build(),
+    );
+    let paused_panel = GlassPanel::new(&picture, &stage, &paused_box, 24.0);
+    paused_panel.set_halign(gtk4::Align::Center);
+    paused_panel.set_valign(gtk4::Align::Center);
+    paused_panel.set_visible(false);
+
+    overlay.add_overlay(&dock);
+    overlay.add_overlay(&stats_panel);
+    overlay.add_overlay(&paused_panel);
+
+    MirrorView {
+        root: stage.upcast(),
+        frame,
+        stats_panel,
+        stats_label,
+        paused_panel,
+        dnd_button,
+    }
+}
+
+fn pointer_button(gesture: &GestureClick) -> PointerButton {
+    match gesture.current_button() {
+        2 => PointerButton::Middle,
+        3 => PointerButton::Secondary,
+        _ => PointerButton::Primary,
+    }
+}
+
+fn attach_pointer_controllers(picture: &Picture) {
+    // Clicks become taps; right-click is Android's Back.
+    let gesture_click = GestureClick::new();
+    gesture_click.set_button(0);
+    let pic = picture.clone();
+    gesture_click.connect_pressed(move |gesture, _, x, y| {
+        let button = pointer_button(gesture);
+        if button == PointerButton::Secondary {
+            send_nav(NavAction::Back);
+            return;
+        }
+        if let Some((x_norm, y_norm)) =
+            normalize_coordinates(pic.width() as f64, pic.height() as f64, x, y)
+        {
+            send(crate::InputGuiMessage::Pointer(PointerEvent {
+                action: PointerAction::Down,
+                button,
+                x_norm,
+                y_norm,
+                pressure: 128,
+                timestamp_us: now_us(),
+            }));
+        }
+    });
+    let pic = picture.clone();
     gesture_click.connect_released(move |gesture, _, x, y| {
-        let button = match gesture.current_button() {
-            1 => PointerButton::Primary,
-            2 => PointerButton::Middle,
-            3 => PointerButton::Secondary,
-            _ => PointerButton::Primary,
-        };
+        let button = pointer_button(gesture);
         if button == PointerButton::Secondary {
             return;
         }
-
-        let w = pic_clone2.width() as f64;
-        let h = pic_clone2.height() as f64;
-        if let Some((x_norm, y_norm)) = normalize_coordinates(w, h, x, y) {
-            if let Some(tx) = crate::INPUT_SENDER.get() {
-                let _ = tx.try_send(crate::InputGuiMessage::Pointer(PointerEvent {
-                    action: PointerAction::Up,
-                    button,
-                    x_norm,
-                    y_norm,
-                    pressure: 0,
-                    timestamp_us: now_us(),
-                }));
-            }
+        if let Some((x_norm, y_norm)) =
+            normalize_coordinates(pic.width() as f64, pic.height() as f64, x, y)
+        {
+            send(crate::InputGuiMessage::Pointer(PointerEvent {
+                action: PointerAction::Up,
+                button,
+                x_norm,
+                y_norm,
+                pressure: 0,
+                timestamp_us: now_us(),
+            }));
         }
     });
     picture.add_controller(gesture_click);
 
-    // 2. Motion controller on picture widget (pointer move / drag)
+    // Pointer motion (drags).
     let motion_controller = EventControllerMotion::new();
-    let pic_clone3 = picture.clone();
+    let pic = picture.clone();
     motion_controller.connect_motion(move |_, x, y| {
-        let w = pic_clone3.width() as f64;
-        let h = pic_clone3.height() as f64;
-        if let Some((x_norm, y_norm)) = normalize_coordinates(w, h, x, y) {
-            if let Some(tx) = crate::INPUT_SENDER.get() {
-                let _ = tx.try_send(crate::InputGuiMessage::Pointer(PointerEvent {
-                    action: PointerAction::Move,
-                    button: PointerButton::None,
-                    x_norm,
-                    y_norm,
-                    pressure: 0,
-                    timestamp_us: now_us(),
-                }));
-            }
+        if let Some((x_norm, y_norm)) =
+            normalize_coordinates(pic.width() as f64, pic.height() as f64, x, y)
+        {
+            send(crate::InputGuiMessage::Pointer(PointerEvent {
+                action: PointerAction::Move,
+                button: PointerButton::None,
+                x_norm,
+                y_norm,
+                pressure: 0,
+                timestamp_us: now_us(),
+            }));
         }
     });
     picture.add_controller(motion_controller);
 
-    // 3. Scroll controller on picture widget (mouse wheel deltas)
+    // Mouse wheel scrolls the phone.
     let scroll_controller = EventControllerScroll::new(EventControllerScrollFlags::BOTH_AXES);
-    let pic_clone4 = picture.clone();
+    let pic = picture.clone();
     scroll_controller.connect_scroll(move |_, dx, dy| {
-        let w = pic_clone4.width() as f64;
-        let h = pic_clone4.height() as f64;
+        let (w, h) = (pic.width() as f64, pic.height() as f64);
         let (x_norm, y_norm) =
             normalize_coordinates(w, h, w / 2.0, h / 2.0).unwrap_or((32768, 32768));
-        if let Some(tx) = crate::INPUT_SENDER.get() {
-            let _ = tx.try_send(crate::InputGuiMessage::Scroll(ScrollEvent {
-                dx: (dx * 120.0) as i16,
-                dy: (dy * 120.0) as i16,
-                x_norm,
-                y_norm,
-                timestamp_us: now_us(),
-            }));
-        }
+        send(crate::InputGuiMessage::Scroll(ScrollEvent {
+            dx: (dx * 120.0) as i16,
+            dy: (dy * 120.0) as i16,
+            x_norm,
+            y_norm,
+            timestamp_us: now_us(),
+        }));
         gtk4::glib::Propagation::Stop
     });
     picture.add_controller(scroll_controller);
-
-    // Build the content area with header bar.
-    let header = HeaderBar::builder()
-        .title_widget(&gtk4::Label::new(Some("HyperLink — Screen Mirror")))
-        .build();
-
-    // DND toggle button in header
-    let dnd_button = gtk4::ToggleButton::builder()
-        .tooltip_text("Do-Not-Disturb (Mute Notifications)")
-        .icon_name("notifications-disabled-symbolic")
-        .build();
-    dnd_button.connect_toggled(move |btn| {
-        if UPDATING_DND_UI.load(Ordering::Relaxed) {
-            return;
-        }
-        let is_active = btn.is_active();
-        crate::set_global_dnd_active(is_active);
-        if let Some(tx) = crate::INPUT_SENDER.get() {
-            let _ = tx.try_send(crate::InputGuiMessage::Dnd(
-                hyperlink_protocol::notification::DndSync {
-                    dnd_enabled: is_active,
-                },
-            ));
-        }
-    });
-    header.pack_end(&dnd_button);
-
-    // Preferences button in header (Phase 11) — click handler wired below once
-    // `window` exists, since the preferences window needs a transient-for parent.
-    let prefs_button = gtk4::Button::builder()
-        .tooltip_text("Preferences")
-        .icon_name("preferences-system-symbolic")
-        .build();
-    header.pack_end(&prefs_button);
-
-    // Stats overlay label (FPS, latency, bitrate — updated externally).
-    let stats_label = gtk4::Label::builder()
-        .label("Waiting for video stream...")
-        .css_classes(["caption", "dim-label"])
-        .halign(gtk4::Align::End)
-        .valign(gtk4::Align::End)
-        .margin_end(12)
-        .margin_bottom(12)
-        .build();
-
-    let overlay = gtk4::Overlay::builder().child(&picture).build();
-    overlay.add_overlay(&stats_label);
-
-    let toast_overlay = adw::ToastOverlay::new();
-    toast_overlay.set_child(Some(&overlay));
-
-    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    content.append(&header);
-    content.append(&toast_overlay);
-
-    // Load saved workflow state if present
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let wf_path = std::path::PathBuf::from(home).join(".config/hyperlink/workflow_state.json");
-    let saved_wf = if wf_path.exists() {
-        std::fs::File::open(&wf_path)
-            .ok()
-            .and_then(|f| serde_json::from_reader(std::io::BufReader::new(f)).ok())
-            .unwrap_or_default()
-    } else {
-        hyperlink_protocol::proximity::WorkflowState::default()
-    };
-
-    let window = ApplicationWindow::builder()
-        .application(app)
-        .title("HyperLink — Screen Mirror")
-        .default_width(saved_wf.window_width as i32)
-        .default_height(saved_wf.window_height as i32)
-        .content(&content)
-        .build();
-
-    if saved_wf.is_fullscreen {
-        window.fullscreen();
-    }
-
-    let window_for_prefs = window.clone();
-    prefs_button.connect_clicked(move |_| {
-        crate::preferences_window::show_preferences_window(&window_for_prefs, config_path.clone());
-    });
-
-    let win_for_close = window.clone();
-    let wf_path_for_close = wf_path.clone();
-    window.connect_close_request(move |_| {
-        let (w, h) = (win_for_close.width() as u32, win_for_close.height() as u32);
-        let is_fs = win_for_close.is_fullscreen();
-        let state = hyperlink_protocol::proximity::WorkflowState {
-            window_width: w,
-            window_height: h,
-            window_x: -1,
-            window_y: -1,
-            is_fullscreen: is_fs,
-            active_package_name: "com.android.launcher".to_string(),
-            display_orientation: 0,
-            saved_timestamp_us: now_us(),
-        };
-        if let Some(parent) = wf_path_for_close.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&state) {
-            let _ = std::fs::write(&wf_path_for_close, json);
-        }
-        gtk4::glib::Propagation::Proceed
-    });
-
-    // 4. Key controller on window (F11 fullscreen, Esc -> Back, Super -> Home, alphanumeric keys)
-    let win_clone = window.clone();
-    let key_controller = EventControllerKey::new();
-    key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
-        if keyval == gdk::Key::F11 {
-            if win_clone.is_fullscreen() {
-                win_clone.unfullscreen();
-            } else {
-                win_clone.fullscreen();
-            }
-            return gtk4::glib::Propagation::Stop;
-        }
-
-        if keyval == gdk::Key::Escape {
-            if let Some(tx) = crate::INPUT_SENDER.get() {
-                let _ = tx.try_send(crate::InputGuiMessage::Nav(NavEvent {
-                    action: NavAction::Back,
-                    timestamp_us: now_us(),
-                }));
-            }
-            return gtk4::glib::Propagation::Stop;
-        }
-
-        if keyval == gdk::Key::Super_L || keyval == gdk::Key::Super_R {
-            if let Some(tx) = crate::INPUT_SENDER.get() {
-                let _ = tx.try_send(crate::InputGuiMessage::Nav(NavEvent {
-                    action: NavAction::Home,
-                    timestamp_us: now_us(),
-                }));
-            }
-            return gtk4::glib::Propagation::Stop;
-        }
-
-        let mut modifiers = 0u8;
-        if state.contains(gdk::ModifierType::SHIFT_MASK) {
-            modifiers |= key_modifiers::SHIFT;
-        }
-        if state.contains(gdk::ModifierType::CONTROL_MASK) {
-            modifiers |= key_modifiers::CTRL;
-        }
-        if state.contains(gdk::ModifierType::ALT_MASK) {
-            modifiers |= key_modifiers::ALT;
-        }
-        if state.contains(gdk::ModifierType::SUPER_MASK) {
-            modifiers |= key_modifiers::META;
-        }
-
-        let wire_keycode = keyval
-            .to_unicode()
-            .map(|c| c as u32)
-            .unwrap_or_else(|| keyval.into_glib());
-
-        if let Some(tx) = crate::INPUT_SENDER.get() {
-            let _ = tx.try_send(crate::InputGuiMessage::Key(KeyEvent {
-                action: KeyAction::Down,
-                keycode: wire_keycode,
-                modifiers,
-                timestamp_us: now_us(),
-            }));
-        }
-
-        gtk4::glib::Propagation::Proceed
-    });
-
-    key_controller.connect_key_released(move |_, keyval, _keycode, state| {
-        if keyval == gdk::Key::F11
-            || keyval == gdk::Key::Escape
-            || keyval == gdk::Key::Super_L
-            || keyval == gdk::Key::Super_R
-        {
-            return;
-        }
-
-        let mut modifiers = 0u8;
-        if state.contains(gdk::ModifierType::SHIFT_MASK) {
-            modifiers |= key_modifiers::SHIFT;
-        }
-        if state.contains(gdk::ModifierType::CONTROL_MASK) {
-            modifiers |= key_modifiers::CTRL;
-        }
-        if state.contains(gdk::ModifierType::ALT_MASK) {
-            modifiers |= key_modifiers::ALT;
-        }
-        if state.contains(gdk::ModifierType::SUPER_MASK) {
-            modifiers |= key_modifiers::META;
-        }
-
-        let wire_keycode = keyval
-            .to_unicode()
-            .map(|c| c as u32)
-            .unwrap_or_else(|| keyval.into_glib());
-
-        if let Some(tx) = crate::INPUT_SENDER.get() {
-            let _ = tx.try_send(crate::InputGuiMessage::Key(KeyEvent {
-                action: KeyAction::Up,
-                keycode: wire_keycode,
-                modifiers,
-                timestamp_us: now_us(),
-            }));
-        }
-    });
-    window.add_controller(key_controller);
-
-    // Apply dark theme via Adwaita style manager.
-    let style_manager = adw::StyleManager::default();
-    style_manager.set_color_scheme(adw::ColorScheme::ForceDark);
-
-    window.present();
-    info!("video window created and presented");
-
-    (window, toast_overlay, dnd_button)
 }
 
-/// Displays an in-app Libadwaita notification toast banner with click-through action.
+fn wire_modifiers(state: gdk::ModifierType) -> u8 {
+    let mut modifiers = 0u8;
+    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+        modifiers |= key_modifiers::SHIFT;
+    }
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+        modifiers |= key_modifiers::CTRL;
+    }
+    if state.contains(gdk::ModifierType::ALT_MASK) {
+        modifiers |= key_modifiers::ALT;
+    }
+    if state.contains(gdk::ModifierType::SUPER_MASK) {
+        modifiers |= key_modifiers::META;
+    }
+    modifiers
+}
+
+fn is_reserved_key(keyval: gdk::Key) -> bool {
+    keyval == gdk::Key::F11
+        || keyval == gdk::Key::Escape
+        || keyval == gdk::Key::Super_L
+        || keyval == gdk::Key::Super_R
+}
+
+/// Forwards the keyboard to the phone while `mirror_active` is set. F11 toggles
+/// fullscreen, Esc is Back, Super is Home.
+pub fn attach_key_controller(window: &adw::ApplicationWindow, mirror_active: Rc<Cell<bool>>) {
+    let win = window.clone();
+    let active = mirror_active.clone();
+    let key_controller = EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
+        if !active.get() {
+            return gtk4::glib::Propagation::Proceed;
+        }
+        if keyval == gdk::Key::F11 {
+            if win.is_fullscreen() {
+                win.unfullscreen();
+            } else {
+                win.fullscreen();
+            }
+            return gtk4::glib::Propagation::Stop;
+        }
+        if keyval == gdk::Key::Escape {
+            send_nav(NavAction::Back);
+            return gtk4::glib::Propagation::Stop;
+        }
+        if keyval == gdk::Key::Super_L || keyval == gdk::Key::Super_R {
+            send_nav(NavAction::Home);
+            return gtk4::glib::Propagation::Stop;
+        }
+        send(crate::InputGuiMessage::Key(KeyEvent {
+            action: KeyAction::Down,
+            keycode: keyval
+                .to_unicode()
+                .map(|c| c as u32)
+                .unwrap_or_else(|| keyval.into_glib()),
+            modifiers: wire_modifiers(state),
+            timestamp_us: now_us(),
+        }));
+        gtk4::glib::Propagation::Proceed
+    });
+
+    let active = mirror_active;
+    key_controller.connect_key_released(move |_, keyval, _keycode, state| {
+        if !active.get() || is_reserved_key(keyval) {
+            return;
+        }
+        send(crate::InputGuiMessage::Key(KeyEvent {
+            action: KeyAction::Up,
+            keycode: keyval
+                .to_unicode()
+                .map(|c| c as u32)
+                .unwrap_or_else(|| keyval.into_glib()),
+            modifiers: wire_modifiers(state),
+            timestamp_us: now_us(),
+        }));
+    });
+    window.add_controller(key_controller);
+}
+
+/// Shows a phone notification as an in-app toast. The button runs the
+/// notification's first action on the phone, or brings this window forward.
 pub fn show_notification_toast(
-    window: &ApplicationWindow,
+    window: &adw::ApplicationWindow,
     toast_overlay: &adw::ToastOverlay,
     notif: hyperlink_protocol::notification::NotificationPost,
 ) {
-    let summary = if notif.app_name.is_empty() {
-        format!("{}: {}", notif.title, notif.body)
-    } else {
-        format!("[{}] {}: {}", notif.app_name, notif.title, notif.body)
+    let title = match (notif.app_name.is_empty(), notif.title.is_empty()) {
+        (false, false) => format!("{} · {}", notif.app_name, notif.title),
+        (true, false) => notif.title.clone(),
+        (false, true) => notif.app_name.clone(),
+        (true, true) => "Notification from your phone".to_string(),
     };
+    let toast = adw::Toast::builder().title(title).timeout(5).build();
 
-    let toast = adw::Toast::new(&summary);
-    toast.set_timeout(5); // 5 seconds display
-
-    let (btn_label, action_id_opt) = if let Some(action) = notif.actions.first() {
-        (action.title.clone(), Some(action.action_id))
-    } else {
-        ("Open Mirror".to_string(), None)
+    let (btn_label, action_id_opt) = match notif.actions.first() {
+        Some(action) => (action.title.clone(), Some(action.action_id)),
+        None => ("Show".to_string(), None),
     };
     toast.set_button_label(Some(&btn_label));
 
-    let win_clone = window.clone();
-    let notif_id_action = notif.id.clone();
+    let win = window.clone();
+    let id = notif.id.clone();
     toast.connect_button_clicked(move |_| {
-        win_clone.present();
+        win.present();
         if let Some(action_id) = action_id_opt {
-            if let Some(tx) = crate::INPUT_SENDER.get() {
-                let _ = tx.try_send(crate::InputGuiMessage::NotificationAction(
-                    hyperlink_protocol::notification::NotificationActionInvoke {
-                        id: notif_id_action.clone(),
-                        action_id,
-                    },
-                ));
-            }
-        }
-    });
-
-    let notif_id_dismiss = notif.id.clone();
-    toast.connect_dismissed(move |_| {
-        if let Some(tx) = crate::INPUT_SENDER.get() {
-            let _ = tx.try_send(crate::InputGuiMessage::NotificationDismiss(
-                hyperlink_protocol::notification::NotificationDismiss {
-                    id: notif_id_dismiss.clone(),
+            send(crate::InputGuiMessage::NotificationAction(
+                hyperlink_protocol::notification::NotificationActionInvoke {
+                    id: id.clone(),
+                    action_id,
                 },
             ));
         }
     });
 
+    // Deliberately not syncing the toast's dismissal back to the phone: a toast
+    // also "dismisses" when it simply times out, and that must not clear the
+    // notification from the phone's shade.
+
     toast_overlay.add_toast(toast);
-}
-
-/// Update the stats overlay label with current metrics.
-///
-/// `latency_ms` is `Some(ms)` only when a calibrated cross-device clock-sync offset
-/// is available. If `None`, latency is omitted to avoid displaying misleading numbers.
-pub fn update_stats_label(
-    window: &ApplicationWindow,
-    fps: f64,
-    bitrate_kbps: u32,
-    latency_ms: Option<f64>,
-) {
-    // Find the overlay's stats label by walking the widget tree.
-    let content = window.content().expect("window has no content");
-    if let Some(vbox) = content.downcast_ref::<gtk4::Box>() {
-        if let Some(last_child) = vbox.last_child() {
-            let overlay_opt = if let Some(to) = last_child.downcast_ref::<adw::ToastOverlay>() {
-                to.child().and_then(|c| c.downcast::<gtk4::Overlay>().ok())
-            } else {
-                last_child.downcast_ref::<gtk4::Overlay>().cloned()
-            };
-
-            if let Some(overlay) = overlay_opt {
-                // The stats label is the first overlay child.
-                let mut child = overlay.first_child();
-                while let Some(widget) = child {
-                    if let Some(label) = widget.downcast_ref::<gtk4::Label>() {
-                        if label.css_classes().iter().any(|c| c == "caption") {
-                            let text = match latency_ms {
-                                Some(lat) if lat > 0.0 => format!(
-                                    "{:.1} fps | {} kbps | {:.1} ms",
-                                    fps, bitrate_kbps, lat
-                                ),
-                                _ => format!("{:.1} fps | {} kbps", fps, bitrate_kbps),
-                            };
-                            label.set_label(&text);
-                            return;
-                        }
-                    }
-                    child = widget.next_sibling();
-                }
-            }
-        }
-    }
 }

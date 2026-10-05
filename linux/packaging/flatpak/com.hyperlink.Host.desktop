@@ -1,9 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=HyperLink
-Comment=Mirror and control a paired Samsung phone from the desktop
+Comment=Use your Android phone from your computer — screen, notifications, clipboard and files
 Exec=hyperlink-linux
 Icon=com.hyperlink.Host
 Terminal=false
 Categories=Network;RemoteAccess;
 StartupNotify=true
+Keywords=phone;android;mirror;screen;notifications;clipboard;samsung;
