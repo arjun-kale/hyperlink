@@ -234,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
     let gtk_app = {
         use gtk4::prelude::*;
         let app = libadwaita::Application::builder()
-            .application_id("com.hyperlink.host")
+            .application_id("com.hyperlink.Host")
             .build();
         app.register(None::<&gtk4::gio::Cancellable>)?;
         if app.is_remote() {

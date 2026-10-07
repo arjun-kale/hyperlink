@@ -75,6 +75,8 @@ android {
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
             } else {
+                // Debug-signed so the APK still installs for local testing.
+                signingConfig = signingConfigs.getByName("debug")
                 logger.warn(
                     "⚠ No keystore.properties found — assembleRelease will fall back to " +
                         "debug signing. That output is fine for testing R8 shrinking locally " +
