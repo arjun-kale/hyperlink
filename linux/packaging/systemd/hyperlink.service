@@ -17,7 +17,7 @@
 
 [Unit]
 Description=HyperLink host daemon (device-union protocol)
-Documentation=https://github.com/hyperlink-project/hyperlink
+Documentation=https://github.com/arjun-kale/hyperlink
 After=network-online.target
 Wants=network-online.target
 

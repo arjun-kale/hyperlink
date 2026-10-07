@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "hyperlink-android-bridge"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "hyperlink-bench"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "hyperlink-linux"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "hyperlink-protocol"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "byteorder",

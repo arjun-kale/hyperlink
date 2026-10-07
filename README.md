@@ -1,55 +1,71 @@
+<p align="center"><img src="linux/data/icons/hicolor/scalable/apps/com.hyperlink.Host.svg" width="96" alt=""></p>
+
 # HyperLink
 
-**Linux ⇄ Samsung, one continuous compute surface.**
+**Your Android phone, on your Linux computer.**
 
-A from-scratch, low-latency device-union protocol — mirrored display, shared input, notifications, clipboard, and files between a Linux host and a Samsung Android device over a single multiplexed QUIC tunnel. Built as a clean-room alternative to closed device-linking protocols, not a reverse-engineering of them.
+See and control your phone's screen with your mouse and keyboard, get its notifications on your desktop, copy on one device and paste on the other, and browse its files from your file manager. Everything goes directly between your devices over your own Wi-Fi — no account, no cloud.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-![Status](https://img.shields.io/badge/status-early%20%2F%20unreleased-yellow)
+![Status](https://img.shields.io/badge/status-beta-orange)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Android-informational)
 [![CI](https://github.com/arjun-kale/hyperlink/actions/workflows/ci.yml/badge.svg)](https://github.com/arjun-kale/hyperlink/actions/workflows/ci.yml)
 
-## Why
+## What you need
 
-Existing solutions either compromise on latency (standard screen mirroring over Wi-Fi) or require closed, vendor-locked protocols (Microsoft Phone Link, Samsung Link to Windows). HyperLink is a single, versioned, self-hosted protocol — no cloud account, no vendor lock-in.
+- A Linux computer with GNOME or another modern desktop (tested on Ubuntu 26.04; release builds target Ubuntu 24.04 and newer).
+- An Android phone running Android 12 or newer (tested on Samsung Galaxy A15, A71 and M54).
+- Both on the same Wi-Fi network.
 
-- **One QUIC tunnel, not five sockets.** Video, input, notifications, clipboard, and file access are separate multiplexed streams over one mTLS-authenticated connection — a large file transfer can't stall a video frame or an input event.
-- **No cloud account, no relay.** Pairing is Trust-On-First-Use with a certificate fingerprint confirmed by a 6-digit PIN, the same model KDE Connect and Signal's safety numbers use.
-- **Freshness over completeness for video.** The mirror stream drops stale frames rather than buffering — a live view of the phone, not a video call.
-- **An ambient context agent, not just a mirror.** A privacy-gated local event bus lets a desktop AI agent answer "what happened on my phone in the last hour?" without ever seeing raw video or clipboard content unless explicitly granted.
-- **Phase-gated, honestly.** Every phase ships against a measured Definition-of-Done, not "it feels fast" — see the per-phase status notes in [`CHANGELOG.md`](CHANGELOG.md) for exactly what's hardware-validated versus still simulation-tested.
+## Install
 
-## Status
+Download both apps from the [latest release](https://github.com/arjun-kale/hyperlink/releases/latest).
 
-Phases 1-11 of the build plan in [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md) exist in code, build, and pass their unit/simulation tests. This is **not yet a released, hardware-validated product** — most phases still need their physical Definition-of-Done verified on real devices, and a few known gaps (proximity pre-warming's architecture, Phase 7's automatic failover wiring) are documented rather than silently claimed as done. [`CHANGELOG.md`](CHANGELOG.md) is the source of truth for what's actually finished versus what's built-but-unverified, phase by phase.
-
-## Quick Start
-
-Full walkthrough, including Android permission grants and troubleshooting: [`docs/ONBOARDING.md`](docs/ONBOARDING.md). The short version:
+**On your computer**, install the media packages HyperLink uses, then the app:
 
 ```sh
-# Linux host — headless daemon (no GUI dependencies required)
-git clone https://github.com/arjun-kale/hyperlink.git && cd hyperlink
-cargo build --release -p hyperlink-linux
-./target/release/hyperlink-linux --pair    # first run: pair a phone, confirm the PIN
-./target/release/hyperlink-linux           # subsequent runs
+sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-gtk4 \
+  wl-clipboard fuse3 libnotify-bin
+# Hardware video decoding (recommended). On Ubuntu 26.04 it's a separate package:
+sudo apt install gstreamer1.0-plugins-extra
 
-# Android companion
-cd android && ./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+tar xzf hyperlink-linux-*-x86_64.tar.gz && cd hyperlink-linux-*-x86_64
+./linux/packaging/install-local.sh --no-build
 ```
 
-The GUI build (mirror window, preferences, notification toasts) needs GTK4/Libadwaita/GStreamer dev packages — see `docs/ONBOARDING.md` for the package list, then build with `cargo build --release -p hyperlink-linux --features video`.
+HyperLink then appears in your apps. (`./linux/packaging/install-local.sh --uninstall` removes it.)
 
-### Linux host CLI
+**On your phone**, open the downloaded `HyperLink-*.apk` and install it. If Android refuses, see [Installing the APK](docs/ONBOARDING.md#installing-the-apk) — Google Play Protect and Samsung Auto Blocker block apps that ask for notification and accessibility access when they don't come from an app store.
 
-| Flag | Default | Description |
-|---|---|---|
-| `--bind` | `0.0.0.0:9900` | Address to bind the QUIC server to |
-| `--name` | `Linux-Host` | Device name advertised over mDNS |
-| `--pair` | off | Start in pairing mode to trust a new device |
-| `--config` | `~/.config/hyperlink/host_config.json` | Path to host credentials and paired-device config |
-| `--agent-query <text>` | — | Run a natural-language query against the ambient context agent and exit |
+## Set up (once)
+
+1. On your computer, open **HyperLink** and click **Start Pairing**.
+2. On your phone, open **HyperLink**, tap **Get started**, then tap your computer.
+3. Your phone shows a code. On your computer, click the same code, then tap **Pair** on the phone.
+4. On the phone, turn on the features you want from the checklist (notifications, control from PC, files, Do Not Disturb sync).
+
+From then on they connect by themselves whenever both are on the same Wi-Fi — even with the phone app closed. To see your phone's screen on the computer, tap **Show screen on PC** on the phone.
+
+Full guide and troubleshooting: [docs/ONBOARDING.md](docs/ONBOARDING.md). How HyperLink handles your data: [PRIVACY.md](PRIVACY.md).
+
+## Good to know
+
+- **Clipboard from computer to phone** works when the HyperLink window is focused on GNOME, because GNOME only tells the focused app about clipboard changes. Phone to computer always works.
+- **Controlling the phone** needs HyperLink's Accessibility permission; Android has no other way for an app to tap the screen.
+- **Status**: beta. Daily use works, but some features (multipath failover, proximity pre-warm) are still experimental — see [CHANGELOG.md](CHANGELOG.md).
+
+## Build from source
+
+```sh
+# Linux app (needs libgtk-4-dev, libadwaita-1-dev, libgstreamer1.0-dev, libgstreamer-plugins-base1.0-dev)
+cargo build --release -p hyperlink-linux --features video
+./linux/packaging/install-local.sh --no-build      # or run ./target/release/hyperlink-linux
+
+# Android app
+cd android && ./gradlew assembleRelease            # app/build/outputs/apk/release/
+```
+
+Without `--features video` you get a headless daemon (pairing in the terminal, no window). Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) from a version tag; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Architecture
 

@@ -20,7 +20,7 @@ use std::time::Duration;
 /// project with no releases published yet — swap this out once real
 /// versioned releases exist.
 const VERSION_FEED_URL: &str =
-    "https://raw.githubusercontent.com/hyperlink-project/hyperlink/main/CHANGELOG.md";
+    "https://raw.githubusercontent.com/arjun-kale/hyperlink/main/CHANGELOG.md";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateCheckResult {

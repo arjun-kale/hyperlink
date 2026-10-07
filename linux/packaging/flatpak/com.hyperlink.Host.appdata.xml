@@ -4,24 +4,29 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
   <name>HyperLink</name>
-  <summary>Mirror and control a paired Samsung phone from Linux</summary>
+  <summary>Use your Android phone from your computer</summary>
   <description>
     <p>
-      HyperLink turns a Samsung phone and a Linux desktop into one continuous
-      compute surface over a single low-latency QUIC tunnel — mirrored
-      display, shared input, notifications, clipboard, and files — without
-      depending on a closed vendor protocol or a cloud account.
+      HyperLink links your Android phone to your Linux computer over your own
+      Wi-Fi. See and control your phone's screen with your mouse and keyboard,
+      get its notifications on your desktop, copy on one device and paste on
+      the other, and browse its files from your file manager.
     </p>
     <p>
-      Pairing uses Trust-On-First-Use certificate pinning confirmed by a
-      6-digit PIN shown on both devices; no account sign-in is required.
+      No account and no cloud: the two devices talk directly, encrypted, and
+      you pair them once by picking the matching code.
     </p>
   </description>
   <launchable type="desktop-id">com.hyperlink.Host.desktop</launchable>
   <content_rating type="oars-1.1" />
-  <url type="homepage">https://github.com/hyperlink-project/hyperlink</url>
-  <url type="vcs-browser">https://github.com/hyperlink-project/hyperlink</url>
+  <url type="homepage">https://github.com/arjun-kale/hyperlink</url>
+  <url type="vcs-browser">https://github.com/arjun-kale/hyperlink</url>
   <releases>
+    <release version="0.3.0" date="2026-10-07">
+      <description>
+        <p>A desktop app with in-app pairing, a redesigned phone app that stays linked in the background, low-latency screen sharing with hardware decoding, and many reliability fixes.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-08-26">
       <description>
         <p>Phases 1-11: pairing, video mirroring, input, notifications, clipboard, file access, network resilience, proximity pre-warm, app-state handoff, ambient context agent, and production packaging.</p>

@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-10-07
+### Added
+- Linux desktop app: one window for pairing, linked status and the phone's screen, replacing the terminal flow. Pairing starts from a button; you pick the code your phone shows from three, instead of answering y/n.
+- Redesigned Android app (Jetpack Compose): welcome, find-your-computer, pairing and linked screens, a permission checklist, and plain-language messages for every failure.
+- The phone stays linked with the app closed, and reconnects on its own for 5 minutes after a drop. The "Linked" notification opens the app and has a Disconnect button.
+- Phone and computer exchange protocol versions and device names on connect; mismatched versions refuse to connect with a clear message, and the computer shows the phone by its real name.
+- App icons from the HyperLink logo, an app-menu entry and installer for Linux, a release workflow that publishes both apps, a privacy policy, and a setup guide.
+### Changed
+- Screen sharing tuned for latency: hardware decoding (VA-API), no clock waits in the display path, frames bypass the UI thread, low-latency encoder settings at 60 fps, Wi-Fi power save off while sharing, and lost frames recover with an immediate keyframe instead of waiting up to a second.
+- The Android app targets Android 16 (API 36).
+### Fixed
+- Clipboard polling made GNOME Shell use ~90% CPU and froze the desktop; the app now uses GTK's clipboard notifications.
+- A blocking clipboard helper could stall the computer's connection server and drop the session.
+- The phone never accepted the computer's clipboard and file streams, which also made the computer's window freeze.
+- Screen sharing crashed the phone app (`RESULT_OK` was treated as an error), and on some Samsung encoders the video never started.
+- The files mount never stayed mounted.
+- Pairing a second phone or computer replaced the first one's trust.
+- Toast timeouts dismissed notifications on the phone.
+- The update check pointed at the wrong repository.
+- App data (including the pairing key) is excluded from Android backup and device transfer.
+- Android CI could never fail (build errors were swallowed).
+
 ## [0.2.0] - 2026-08-26
 ### Added
 - **Phase 1 complete**: Protocol Spine (Pairing + QUIC Tunnel).
