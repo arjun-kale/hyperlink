@@ -23,14 +23,14 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "com.hyperlink.companion"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.hyperlink.companion"
         minSdk = 31 // Android 12+ — see docs/SYSTEM_DESIGN.md hardware assumptions
-        targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        targetSdk = 36
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     compileOptions {

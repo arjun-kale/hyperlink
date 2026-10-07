@@ -117,7 +117,12 @@ class ScreenCaptureService : Service() {
 
         // Note RESULT_OK is -1, so the "missing" default must be something else.
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE)
-        val data: Intent? = intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+        val data: Intent? = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_DATA)
+        }
 
         if (resultCode != android.app.Activity.RESULT_OK || data == null) {
             Log.e(TAG, "Invalid start parameters (resultCode=$resultCode, data=${data != null})")

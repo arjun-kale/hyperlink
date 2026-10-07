@@ -389,6 +389,16 @@ private fun LinkedScreen(state: UiState, actions: UiActions, onSettings: () -> U
     val c = LocalHl.current
     val computer = (state.phase as? LinkPhase.Connected)?.computer ?: "your computer"
     val p = state.permissions
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
+    if (showAccessibilityDisclosure) {
+        AccessibilityDisclosure(
+            onContinue = {
+                showAccessibilityDisclosure = false
+                actions.openPermission(PermissionKind.Control)
+            },
+            onDismiss = { showAccessibilityDisclosure = false },
+        )
+    }
     ScreenColumn(topBar = { TopBar(onSettings = onSettings) }) {
         Spacer(Modifier.height(Space.lg))
         GlassCard(Modifier.fillMaxWidth()) {
@@ -446,7 +456,7 @@ private fun LinkedScreen(state: UiState, actions: UiActions, onSettings: () -> U
                 if (p.control) "Mouse and keyboard work on your phone" else "Turn on HyperLink in Accessibility settings",
                 ok = p.control,
                 action = if (p.control) null else "Turn on",
-                onAction = { actions.openPermission(PermissionKind.Control) },
+                onAction = { showAccessibilityDisclosure = true },
             )
             Divider()
             FeatureRow(
@@ -549,4 +559,32 @@ private fun SettingsScreen(state: UiState, actions: UiActions, onBack: () -> Uni
         CenteredText("Your phone and computer, over your own Wi-Fi.", Type.caption, c.textMuted)
         Spacer(Modifier.height(Space.xl))
     }
+}
+
+/**
+ * Explains exactly what HyperLink does with Accessibility before the user turns
+ * it on (Google Play requires this "prominent disclosure"; it's also just the
+ * honest thing to show before asking for a powerful permission).
+ */
+@Composable
+private fun AccessibilityDisclosure(onContinue: () -> Unit, onDismiss: () -> Unit) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Let your computer control this phone?") },
+        text = {
+            Text(
+                "HyperLink uses Android's Accessibility service to:\n\n" +
+                    "• Tap, swipe, type and press Back or Home when you do it from your paired computer.\n" +
+                    "• Notice when you copy text, so it reaches your computer even when HyperLink is in the background.\n\n" +
+                    "It can't read what's on your screen, and nothing is sent anywhere except your own computer. " +
+                    "You can turn it off any time in Settings → Accessibility.",
+            )
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onContinue) { Text("Continue to Settings") }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Not now") }
+        },
+    )
 }
