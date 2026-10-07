@@ -177,6 +177,10 @@ struct ClientState {
     /// trust it back.
     pairing_user_confirmed: Option<String>,
     pairing_host_accepted: bool,
+    /// What the user calls this phone, sent in our Hello.
+    device_name: Option<String>,
+    /// We closed the connection because the computer's protocol differs.
+    protocol_mismatch: bool,
     event_rx: Option<mpsc::UnboundedReceiver<ClientEvent>>,
     event_tx: Option<mpsc::UnboundedSender<ClientEvent>>,
     control_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
@@ -318,6 +322,21 @@ pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_connectHos
     });
 }
 
+/// Sets the name this phone introduces itself with (what the user calls it in
+/// Android's settings), shown on the computer.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_hyperlink_companion_QuicClient_setDeviceName(
+    mut env: JNIEnv,
+    _class: JClass,
+    name: JString,
+) {
+    let name: String = env.get_string(&name).map(Into::into).unwrap_or_default();
+    let name = name.trim().to_string();
+    if !name.is_empty() {
+        CLIENT_STATE.lock().unwrap().device_name = Some(name);
+    }
+}
+
 /// Closes the current connection, if any (the user tapped Disconnect or
 /// cancelled pairing). Reported back as a `closed_locally` disconnect.
 #[no_mangle]
@@ -407,6 +426,7 @@ fn close_reason_code(err: &quinn::ConnectionError) -> String {
         quinn::ConnectionError::ApplicationClosed(close) => match close.reason.as_ref() {
             b"pairing rejected" => "pairing_rejected",
             b"pairing timed out" => "pairing_timed_out",
+            b"protocol mismatch" => "protocol_mismatch",
             b"device revoked" => "device_revoked",
             b"pairing window closed" => "pairing_closed",
             _ => "host_closed",
@@ -965,6 +985,18 @@ async fn run_connection_task(
     send_stream.write_all(&[0x50]).await?;
     info!("control plane stream opened");
 
+    // Introduce ourselves: protocol version (checked by the computer), app
+    // version and this phone's name.
+    let hello = {
+        let state = CLIENT_STATE.lock().unwrap();
+        let name = state
+            .device_name
+            .clone()
+            .unwrap_or_else(|| "Android phone".to_string());
+        hyperlink_protocol::version::Hello::new(env!("CARGO_PKG_VERSION"), &name, "android")
+    };
+    send_stream.write_all(&hello.to_packet()).await?;
+
     // Channels for sending messages.
     let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     {
@@ -1004,6 +1036,27 @@ async fn run_connection_task(
                 }
 
                 match header.message_type {
+                    hyperlink_protocol::message::MessageType::Hello => {
+                        if let Some(hello) = hyperlink_protocol::version::Hello::decode(&payload) {
+                            if hello.is_compatible() {
+                                info!(
+                                    "computer introduced itself: {} ({})",
+                                    hello.name, hello.app_version
+                                );
+                            } else {
+                                warn!(
+                                    "computer speaks protocol {} (HyperLink {}); disconnecting",
+                                    hello.protocol, hello.app_version
+                                );
+                                let state = CLIENT_STATE.lock().unwrap();
+                                if let Some(conn) = state.connection.as_ref() {
+                                    conn.close(0u32.into(), b"protocol mismatch");
+                                }
+                                drop(state);
+                                CLIENT_STATE.lock().unwrap().protocol_mismatch = true;
+                            }
+                        }
+                    }
                     hyperlink_protocol::message::MessageType::NotificationActionInvoke => {
                         if let Ok(invoke) =
                             hyperlink_protocol::notification::NotificationActionInvoke::decode(
@@ -1531,12 +1584,17 @@ async fn run_connection_task(
     };
 
     // A pairing that didn't finish leaves nothing behind.
-    {
+    let reason = {
         let mut state = CLIENT_STATE.lock().unwrap();
         state.pending_pairing_fp = None;
         state.pairing_user_confirmed = None;
         state.pairing_host_accepted = false;
-    }
+        if std::mem::take(&mut state.protocol_mismatch) {
+            "protocol_mismatch".to_string()
+        } else {
+            reason
+        }
+    };
     emit_event(ClientEvent::Disconnected(reason));
 
     // Reset control channel.

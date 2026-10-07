@@ -10,5 +10,7 @@ class HyperLinkApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashReporter.install(this)
+        // The link to the computer lives for the whole process, not one screen.
+        Link.init(this)
     }
 }

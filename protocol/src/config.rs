@@ -145,6 +145,22 @@ impl DeviceConfig {
         key
     }
 
+    /// Re-labels the peer with `fingerprint` as `name` (made unique the same way
+    /// as `add_trusted_peer_unique`), e.g. once a phone says what it's called.
+    /// Returns the key now used, or `None` if the fingerprint isn't trusted.
+    pub fn rename_trusted_peer(&mut self, fingerprint: &str, name: &str) -> Option<String> {
+        let old_key = self
+            .trusted_peers
+            .iter()
+            .find(|(_, fp)| fp.as_str() == fingerprint)
+            .map(|(k, _)| k.clone())?;
+        if old_key == name {
+            return Some(old_key);
+        }
+        self.trusted_peers.remove(&old_key);
+        Some(self.add_trusted_peer_unique(name, fingerprint))
+    }
+
     /// Remove a peer from the trusted list.
     pub fn remove_trusted_peer(&mut self, peer_name: &str) {
         self.trusted_peers.remove(peer_name);

@@ -106,8 +106,70 @@ impl Header {
     }
 }
 
+/// Introduces one side of a session to the other. Sent first on the control
+/// stream by both phone and computer, as JSON (it's tiny and sent once).
+///
+/// Peers that predate `Hello` never send one; receivers must treat a missing
+/// Hello as "same protocol, name unknown" rather than an error.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Hello {
+    /// The sender's `PROTOCOL_VERSION`.
+    pub protocol: u8,
+    /// The sender's app version, for display ("0.1.0").
+    pub app_version: String,
+    /// What the user calls this device ("Galaxy A15 5G", "Arjun's Laptop").
+    pub name: String,
+    /// "android" or "linux".
+    pub platform: String,
+}
+
+impl Hello {
+    pub fn new(app_version: &str, name: &str, platform: &str) -> Self {
+        Self {
+            protocol: PROTOCOL_VERSION,
+            app_version: app_version.to_string(),
+            name: name.to_string(),
+            platform: platform.to_string(),
+        }
+    }
+
+    /// Whether the peer speaks the same protocol as this build.
+    pub fn is_compatible(&self) -> bool {
+        self.protocol == PROTOCOL_VERSION
+    }
+
+    /// Header + JSON payload, ready to write to the control stream.
+    pub fn to_packet(&self) -> Vec<u8> {
+        let payload = serde_json::to_vec(self).unwrap_or_default();
+        let mut packet = Vec::with_capacity(HEADER_SIZE + payload.len());
+        let _ = Header::new(MessageType::Hello, payload.len() as u32).encode(&mut packet);
+        packet.extend_from_slice(&payload);
+        packet
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        serde_json::from_slice(payload).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hello_round_trips_and_checks_version() {
+        let hello = super::Hello::new("0.1.0", "Galaxy A15 5G", "android");
+        let packet = hello.to_packet();
+        let header = super::Header::decode(&packet).unwrap();
+        assert_eq!(header.message_type, crate::message::MessageType::Hello);
+        let decoded = super::Hello::decode(&packet[super::HEADER_SIZE..]).unwrap();
+        assert_eq!(decoded, hello);
+        assert!(decoded.is_compatible());
+        let future = super::Hello {
+            protocol: super::PROTOCOL_VERSION + 1,
+            ..decoded
+        };
+        assert!(!future.is_compatible());
+    }
+
     use super::*;
 
     #[test]

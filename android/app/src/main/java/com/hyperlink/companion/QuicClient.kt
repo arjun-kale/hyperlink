@@ -28,6 +28,7 @@ object QuicClient {
     private external fun connectHost(hostIp: String, port: Int, isPairing: Boolean)
     private external fun confirmPairing(hostName: String): Boolean
     private external fun disconnectHost()
+    external fun setDeviceName(name: String)
     private external fun sendMessage(payload: ByteArray): Boolean
     private external fun pollEvent(): String?
     private external fun sendVideoFrame(frameData: ByteArray, frameId: Int, timestampUs: Long, isKeyframe: Boolean, width: Int, height: Int): Boolean

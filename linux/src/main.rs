@@ -61,8 +61,14 @@ pub static INPUT_RECEIVER: std::sync::OnceLock<async_channel::Receiver<InputGuiM
 /// Session lifecycle the GUI reflects (sent from the connection handler).
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    PhoneConnected { device_name: String },
+    PhoneConnected {
+        device_name: String,
+    },
     PhoneDisconnected,
+    /// The phone runs an incompatible HyperLink version and was disconnected.
+    ProtocolMismatch {
+        peer_app_version: String,
+    },
 }
 
 static DND_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -584,6 +590,12 @@ fn run_with_gui(
                     }
                     VideoGuiMessage::Session(SessionEvent::PhoneDisconnected) => {
                         window.on_phone_disconnected();
+                    }
+                    VideoGuiMessage::Session(SessionEvent::ProtocolMismatch { peer_app_version }) => {
+                        window.toast(&format!(
+                            "Your phone has HyperLink {peer_app_version}, which doesn't work with this version ({}). Update both apps to the latest version.",
+                            env!("CARGO_PKG_VERSION")
+                        ));
                     }
                     VideoGuiMessage::PairingRequest { pin, reply } => {
                         window.on_pairing_request(pin, reply);

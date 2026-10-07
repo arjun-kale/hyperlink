@@ -82,10 +82,23 @@ class ScreenCaptureService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Keeps Wi-Fi out of power-save while sharing the screen. In power-save the
+     * radio batches packets, which adds delay and bursty loss to the video.
+     * Held only while sharing: it costs battery.
+     */
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+
     override fun onCreate() {
         super.onCreate()
         instance = this
         createNotificationChannel()
+        wifiLock = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+            ?.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "HyperLink:mirroring")
+            ?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -136,6 +149,8 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         instance = null
+        wifiLock?.takeIf { it.isHeld }?.release()
+        wifiLock = null
         stopCapture()
         super.onDestroy()
     }
@@ -367,6 +382,8 @@ class ScreenCaptureService : Service() {
             Log.i(TAG, "MediaProjection stopped by system")
             stopCapture()
             stopSelf()
+            // Stopped outside the app (e.g. the status-bar cast chip): keep the UI honest.
+            Link.store.update { it.copy(mirroring = false) }
         }
     }
 

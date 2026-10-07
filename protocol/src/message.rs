@@ -23,6 +23,9 @@ pub enum MessageType {
     EchoResponse = 0x11,
     /// Keepalive heartbeat (bidirectional).
     Heartbeat = 0x20,
+    /// First message each side sends on the control stream: protocol version,
+    /// app version and device name (see `version::Hello`).
+    Hello = 0x21,
     // --- Phase 2: video stream messages (0x30–0x3F) ---
     /// Encoded H.264 video frame (phone → host, unreliable datagram).
     VideoFrame = 0x30,
@@ -146,6 +149,7 @@ impl TryFrom<u8> for MessageType {
             0x10 => Ok(Self::EchoRequest),
             0x11 => Ok(Self::EchoResponse),
             0x20 => Ok(Self::Heartbeat),
+            0x21 => Ok(Self::Hello),
             0x30 => Ok(Self::VideoFrame),
             0x31 => Ok(Self::VideoConfig),
             0x32 => Ok(Self::BitrateAck),
@@ -209,6 +213,7 @@ impl std::fmt::Display for MessageType {
             Self::EchoRequest => write!(f, "EchoRequest"),
             Self::EchoResponse => write!(f, "EchoResponse"),
             Self::Heartbeat => write!(f, "Heartbeat"),
+            Self::Hello => write!(f, "Hello"),
             Self::VideoFrame => write!(f, "VideoFrame"),
             Self::VideoConfig => write!(f, "VideoConfig"),
             Self::BitrateAck => write!(f, "BitrateAck"),
@@ -275,6 +280,7 @@ mod tests {
             MessageType::EchoRequest,
             MessageType::EchoResponse,
             MessageType::Heartbeat,
+            MessageType::Hello,
             MessageType::VideoFrame,
             MessageType::VideoConfig,
             MessageType::BitrateAck,

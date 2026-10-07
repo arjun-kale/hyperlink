@@ -785,6 +785,15 @@ async fn handle_incoming_connection(
 
                 if stream_type == 0x50 {
                     // Control plane stream. Handles notification sync, DND, clipboard, multipath, proximity, handoff, and ambient.
+                    let hello_conn = connection.clone();
+                    let hello_config = config_arc.clone();
+                    let hello_config_path = config_path.clone();
+                    let hello_fp = fp_str.clone();
+                    let our_hello = hyperlink_protocol::version::Hello::new(
+                        env!("CARGO_PKG_VERSION"),
+                        &config_arc.lock().unwrap().device_name,
+                        "linux",
+                    );
                     let clip_mgr_inbound = clipboard_mgr.clone();
                     let mp_mgr_control = multipath_mgr.clone();
                     let prox_mgr_control = proximity_mgr.clone();
@@ -792,6 +801,8 @@ async fn handle_incoming_connection(
                     let ambient_bus_control = ambient_bus.clone();
                     let ambient_agent_control = ambient_agent.clone();
                     tokio::spawn(async move {
+                        // Introduce ourselves first; older phones just ignore it.
+                        let _ = send_stream.write_all(&our_hello.to_packet()).await;
                         let mut hdr_bytes = [0u8; hyperlink_protocol::version::HEADER_SIZE];
                         loop {
                             if recv_stream.read_exact(&mut hdr_bytes).await.is_err() {
@@ -809,6 +820,46 @@ async fn handle_incoming_connection(
                                 }
 
                                 match header.message_type {
+                                    hyperlink_protocol::message::MessageType::Hello => {
+                                        let Some(hello) =
+                                            hyperlink_protocol::version::Hello::decode(&payload)
+                                        else {
+                                            continue;
+                                        };
+                                        if !hello.is_compatible() {
+                                            warn!(
+                                                phone_protocol = hello.protocol,
+                                                phone_app = %hello.app_version,
+                                                "phone speaks a different protocol version; disconnecting"
+                                            );
+                                            notify_gui(crate::SessionEvent::ProtocolMismatch {
+                                                peer_app_version: hello.app_version.clone(),
+                                            });
+                                            hello_conn.close(0u32.into(), b"protocol mismatch");
+                                            break;
+                                        }
+                                        info!(
+                                            name = %hello.name,
+                                            app = %hello.app_version,
+                                            "phone introduced itself"
+                                        );
+                                        // Show (and remember) the phone by its real name.
+                                        let name = hello.name.trim();
+                                        if !name.is_empty() {
+                                            let key = {
+                                                let mut config = hello_config.lock().unwrap();
+                                                let key = config.rename_trusted_peer(&hello_fp, name);
+                                                if let Err(e) = config.save(&hello_config_path) {
+                                                    warn!(error = %e, "failed to save phone name");
+                                                }
+                                                crate::refresh_proximity_trust(&config.trusted_peers);
+                                                key
+                                            };
+                                            notify_gui(crate::SessionEvent::PhoneConnected {
+                                                device_name: key.unwrap_or_else(|| name.to_string()),
+                                            });
+                                        }
+                                    }
                                     hyperlink_protocol::message::MessageType::NotificationPost => {
                                         let host_received_us =
                                             hyperlink_protocol::clock::now_us();
